@@ -41,7 +41,7 @@ En este laboratorio desplegarás el stack completo de monitorización kube-prome
 
 | Componente | Versión/Detalle |
 |------------|----------------|
-| Kubernetes | 1.30.2 (kind) |
+| Kubernetes | 1.35.8 (kind) |
 | kube-prometheus-stack | 61.3.0 |
 | Prometheus | 2.53.0 |
 | Grafana | 11.1.0 |
@@ -52,8 +52,9 @@ En este laboratorio desplegarás el stack completo de monitorización kube-prome
 ### Preparación Inicial
 
 ```bash
-# Verificar contexto del clúster
-kubectl config use-context kind-lab-calico
+# Verificar contexto del clúster sin depender del contexto global
+export KUBE_CONTEXT=kind-lab-calico
+kubectl cluster-info --context "$KUBE_CONTEXT"
 
 # Crear directorio de trabajo
 mkdir -p ~/k8s-labs/lab05/{values,rules,monitors,alertmanager,incidents,dashboards}
@@ -68,8 +69,18 @@ kubectl get pods -n webapp
 kubectl get svc -n webapp
 
 # Añadir repo Helm si no existe
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
 helm repo update
+
+# Crear el namespace antes de guardar la credencial de Grafana.
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
+
+# Credencial efímera para Grafana; no se guarda en el repositorio.
+export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+  --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
 ```
 
 ## Paso a Paso
@@ -306,7 +317,10 @@ alertmanager:
 grafana:
   enabled: true
   adminUser: admin
-  adminPassword: "KubeGrafana2024!"
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
   persistence:
     enabled: true
     storageClassName: standard
@@ -332,7 +346,7 @@ grafana:
       basicAuth: true
       basicAuthUser: elastic
       secureJsonData:
-        basicAuthPassword: "ElasticK8s2024!"
+         basicAuthPassword: "${ELASTIC_PASSWORD}"
       jsonData:
         index: "filebeat-*"
         timeField: "@timestamp"
@@ -674,30 +688,29 @@ spec:
 EOF
 ```
 
-2. Crear un ServiceMonitor adicional para NGINX Ingress Controller:
+2. Crear un ServiceMonitor adicional para Traefik:
 
 ```bash
-cat > ~/k8s-labs/lab05/monitors/ingress-servicemonitor.yaml << 'EOF'
+cat > ~/k8s-labs/lab05/monitors/traefik-servicemonitor.yaml << 'EOF'
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: ingress-nginx-monitor
-  namespace: ingress-nginx
+  name: traefik-monitor
+  namespace: traefik
   labels:
-    app: ingress-nginx
+    app.kubernetes.io/name: traefik
     release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: ingress-nginx
-      app.kubernetes.io/component: controller
+      app.kubernetes.io/name: traefik
   endpoints:
     - port: metrics
       interval: 30s
       path: /metrics
   namespaceSelector:
     matchNames:
-      - ingress-nginx
+      - traefik
 EOF
 ```
 
@@ -705,7 +718,7 @@ EOF
 
 ```bash
 kubectl apply -f ~/k8s-labs/lab05/monitors/webapp-servicemonitor.yaml
-kubectl apply -f ~/k8s-labs/lab05/monitors/ingress-servicemonitor.yaml
+kubectl apply -f ~/k8s-labs/lab05/monitors/traefik-servicemonitor.yaml
 ```
 
 4. Verificar que Prometheus descubrió los targets:
@@ -725,7 +738,7 @@ kill %1 2>/dev/null
 
 ```
 servicemonitor.monitoring.coreos.com/webapp-monitor created
-servicemonitor.monitoring.coreos.com/ingress-nginx-monitor created
+servicemonitor.monitoring.coreos.com/traefik-monitor created
 ```
 
 **Verificación:**

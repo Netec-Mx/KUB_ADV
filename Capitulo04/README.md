@@ -48,21 +48,29 @@ En este laboratorio se construirá una infraestructura completa de logging y tra
 | Fluentd | 1.17.0 |
 | Jaeger / Jaeger Operator | 1.58.0 |
 | OpenTelemetry Collector | 0.103.0 |
-| Helm | 3.15.2 |
-| kubectl | 1.30.2 |
+| Helm | 3.20.x o posterior compatible |
+| kubectl | 1.35.x |
 
 ### Preparación Inicial
 
 ```bash
-# Verificar contexto del clúster
-kubectl config use-context kind-lab-calico
+# Verificar contexto del clúster sin depender del contexto global
+export KUBE_CONTEXT=kind-lab-calico
+kubectl cluster-info --context "$KUBE_CONTEXT"
 
 # Crear directorio de trabajo
 mkdir -p ~/k8s-labs/lab04
 cd ~/k8s-labs/lab04
 
-# Crear namespace logging
-kubectl create namespace logging
+# Crear namespace logging de forma reejecutable
+kubectl create namespace logging --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
+
+# Generar una credencial efímera para el laboratorio y guardarla como Secret.
+# No la subas al repositorio ni la reutilices fuera del clúster desechable.
+export ELASTIC_PASSWORD="${ELASTIC_PASSWORD:-$(openssl rand -hex 24)}"
+kubectl create secret generic elastic-credentials -n logging \
+  --from-literal=elastic-password="$ELASTIC_PASSWORD" \
+  --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
 
 # Verificar que vm.max_map_count está configurado en los nodos kind
 for node in $(kind get nodes --name lab-calico); do
@@ -70,9 +78,9 @@ for node in $(kind get nodes --name lab-calico); do
 done
 
 # Verificar Helm repos
-helm repo add elastic https://helm.elastic.co 2>/dev/null || true
-helm repo add jaegertracing https://jaegertracing.github.io/helm-charts 2>/dev/null || true
-helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
+helm repo add elastic https://helm.elastic.co --force-update
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts --force-update
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts --force-update
 helm repo update
 ```
 
@@ -127,9 +135,10 @@ volumeClaimTemplate:
 # Variables de entorno para credenciales
 extraEnvs:
   - name: ELASTIC_PASSWORD
-    value: "ElasticK8s2024!"
-  - name: xpack.security.enabled
-    value: "true"
+    valueFrom:
+      secretKeyRef:
+        name: elastic-credentials
+        key: elastic-password
 
 # Deshabilitar antiaffinity para single-node en kind
 antiAffinity: "soft"
@@ -169,7 +178,7 @@ EOF
 helm install elasticsearch elastic/elasticsearch \
   --namespace logging \
   --values ~/k8s-labs/lab04/elasticsearch-values.yaml \
-  --version 8.5.1 \
+  --version 8.14.1 \
   --wait --timeout 5m
 ```
 
@@ -191,7 +200,7 @@ pod/elasticsearch-master-0 condition met
 ```bash
 # Verificar estado del clúster Elasticsearch
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://localhost:9200/_cluster/health | \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cluster/health | \
   python3 -m json.tool
 ```
 
@@ -220,7 +229,10 @@ extraEnvs:
   - name: ELASTICSEARCH_USERNAME
     value: "elastic"
   - name: ELASTICSEARCH_PASSWORD
-    value: "ElasticK8s2024!"
+    valueFrom:
+      secretKeyRef:
+        name: elastic-credentials
+        key: elastic-password
   - name: SERVER_BASEPATH
     value: ""
 
@@ -248,7 +260,7 @@ kibanaConfig:
     server.host: "0.0.0.0"
     elasticsearch.hosts: ["http://elasticsearch-master:9200"]
     elasticsearch.username: "elastic"
-    elasticsearch.password: "ElasticK8s2024!"
+    # La contraseña se inyecta mediante ELASTICSEARCH_PASSWORD desde el Secret.
     monitoring.ui.enabled: false
 EOF
 ```
@@ -259,7 +271,7 @@ EOF
 helm install kibana elastic/kibana \
   --namespace logging \
   --values ~/k8s-labs/lab04/kibana-values.yaml \
-  --version 8.5.1 \
+  --version 8.14.1 \
   --wait --timeout 5m
 ```
 
@@ -280,7 +292,7 @@ pod/kibana-kibana-<hash> condition met
 
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://kibana-kibana:5601/api/status | \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana-kibana:5601/api/status | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Kibana status: {d[\"status\"][\"overall\"][\"level\"]}')"
 ```
 
@@ -362,7 +374,7 @@ data:
       host elasticsearch-master.logging.svc.cluster.local
       port 9200
       user elastic
-      password ElasticK8s2024!
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
       scheme http
       logstash_format true
       logstash_prefix kubernetes
@@ -459,7 +471,10 @@ spec:
             - name: FLUENT_ELASTICSEARCH_USER
               value: "elastic"
             - name: FLUENT_ELASTICSEARCH_PASSWORD
-              value: "ElasticK8s2024!"
+              valueFrom:
+                secretKeyRef:
+                  name: elastic-credentials
+                  key: elastic-password
           resources:
             requests:
               cpu: 100m
@@ -521,7 +536,7 @@ kubectl get pods -n logging -l app=fluentd -o wide
 
 # Verificar que los índices se están creando en Elasticsearch
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://localhost:9200/_cat/indices?v | grep kubernetes
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cat/indices?v | grep kubernetes
 ```
 
 Debe mostrar al menos un índice con patrón `kubernetes-YYYY.MM.DD` con documentos.
@@ -556,7 +571,7 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=jaeger-operator
 3. Crear el recurso Jaeger CRD tipo producción:
 
 ```bash
-cat > ~/k8s-labs/lab04/jaeger-instance.yaml << 'EOF'
+cat > ~/k8s-labs/lab04/jaeger-instance.yaml << EOF
 apiVersion: jaegertracing.io/v1
 kind: Jaeger
 metadata:
@@ -595,7 +610,7 @@ spec:
       es:
         server-urls: http://elasticsearch-master.logging.svc.cluster.local:9200
         username: elastic
-        password: ElasticK8s2024!
+        password: ${ELASTIC_PASSWORD}
         index-prefix: jaeger
         tls:
           enabled: false
@@ -954,7 +969,7 @@ sleep 15
 
 # Buscar logs que contengan trace_id
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/kubernetes-*/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -979,7 +994,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 ```bash
 # Consultar servicios registrados en Jaeger
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/jaeger-span-*/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -998,7 +1013,7 @@ Los logs deben contener campos `trace_id` con valores hexadecimales de 32 caract
 ```bash
 # Contar documentos con trace_id válido
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/kubernetes-*/_count' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -1035,7 +1050,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
   'http://kibana-kibana.logging.svc.cluster.local:5601/api/saved_objects/index-pattern/kubernetes-logs' \
   -H 'kbn-xsrf: true' \
   -H 'Content-Type: application/json' \
-  -u elastic:ElasticK8s2024! \
+  -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
     "attributes": {
       "title": "kubernetes-*",
@@ -1053,7 +1068,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
   'http://kibana-kibana.logging.svc.cluster.local:5601/api/saved_objects/index-pattern/jaeger-spans' \
   -H 'kbn-xsrf: true' \
   -H 'Content-Type: application/json' \
-  -u elastic:ElasticK8s2024! \
+  -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
     "attributes": {
       "title": "jaeger-span-*",
@@ -1071,7 +1086,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
   'http://kibana-kibana.logging.svc.cluster.local:5601/api/saved_objects/search/webapp-traces' \
   -H 'kbn-xsrf: true' \
   -H 'Content-Type: application/json' \
-  -u elastic:ElasticK8s2024! \
+  -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
     "attributes": {
       "title": "Webapp Logs with Trace ID",
@@ -1092,14 +1107,14 @@ echo "Jaeger UI disponible en: http://localhost:16686"
 
 # Port-forward para acceder a Kibana
 kubectl port-forward -n logging svc/kibana-kibana 5601:5601 &
-echo "Kibana disponible en: http://localhost:5601 (elastic/ElasticK8s2024!)"
+echo "Kibana disponible en: http://localhost:5601 (credencial en ELASTIC_PASSWORD)"
 ```
 
 ### Salida Esperada
 
 ```
 Jaeger UI disponible en: http://localhost:16686
-Kibana disponible en: http://localhost:5601 (elastic/ElasticK8s2024!)
+Kibana disponible en: http://localhost:5601 (credencial en ELASTIC_PASSWORD)
 ```
 
 ### Verificación
@@ -1107,7 +1122,7 @@ Kibana disponible en: http://localhost:5601 (elastic/ElasticK8s2024!)
 ```bash
 # Verificar que los index patterns existen
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://kibana-kibana.logging.svc.cluster.local:5601/api/saved_objects/_find?type=index-pattern' \
   -H 'kbn-xsrf: true' | python3 -c "
 import sys, json
@@ -1135,7 +1150,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -X PUT \
   'http://localhost:9200/_ilm/policy/kubernetes-logs-policy' \
   -H 'Content-Type: application/json' \
-  -u elastic:ElasticK8s2024! \
+  -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
     "policy": {
       "phases": {
@@ -1177,7 +1192,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -X PUT \
   'http://localhost:9200/_index_template/kubernetes-logs-template' \
   -H 'Content-Type: application/json' \
-  -u elastic:ElasticK8s2024! \
+  -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
     "index_patterns": ["kubernetes-*"],
     "template": {
@@ -1195,7 +1210,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/_ilm/policy/kubernetes-logs-policy?pretty'
 ```
 
@@ -1221,7 +1236,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 ```bash
 # Verificar que el template está aplicado
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/_index_template/kubernetes-logs-template?pretty' | \
   grep -A2 "lifecycle"
 ```
@@ -1240,7 +1255,7 @@ echo "=== VALIDACIÓN COMPLETA DEL LAB 04 ==="
 echo ""
 echo "1. Verificando Elasticsearch..."
 ES_STATUS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://localhost:9200/_cluster/health | \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cluster/health | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
 echo "   Estado del clúster: $ES_STATUS"
 [ "$ES_STATUS" = "green" ] || [ "$ES_STATUS" = "yellow" ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1248,7 +1263,7 @@ echo "   Estado del clúster: $ES_STATUS"
 echo ""
 echo "2. Verificando Kibana..."
 KIBANA_STATUS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://kibana-kibana:5601/api/status | \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana-kibana:5601/api/status | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['status']['overall']['level'])" 2>/dev/null)
 echo "   Estado de Kibana: $KIBANA_STATUS"
 [ "$KIBANA_STATUS" = "available" ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1276,7 +1291,7 @@ echo "$WEBAPP_CONTAINERS" | grep -q "otel-collector" && echo "   ✓ PASS" || ec
 echo ""
 echo "6. Verificando índices en Elasticsearch..."
 INDEX_COUNT=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! 'http://localhost:9200/_cat/indices?h=index' | \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" 'http://localhost:9200/_cat/indices?h=index' | \
   grep -c "kubernetes-")
 echo "   Índices kubernetes-*: $INDEX_COUNT"
 [ "$INDEX_COUNT" -ge 1 ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1284,7 +1299,7 @@ echo "   Índices kubernetes-*: $INDEX_COUNT"
 echo ""
 echo "7. Verificando logs con trace_id..."
 TRACE_LOGS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/kubernetes-*/_count' \
   -H 'Content-Type: application/json' \
   -d '{"query":{"bool":{"must":[{"match":{"kubernetes.namespace_name":"webapp"}}]}}}' | \
@@ -1295,7 +1310,7 @@ echo "   Logs de webapp en ES: $TRACE_LOGS"
 echo ""
 echo "8. Verificando ILM Policy..."
 ILM_EXISTS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! \
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" \
   'http://localhost:9200/_ilm/policy/kubernetes-logs-policy' | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print('exists' if 'kubernetes-logs-policy' in d else 'missing')")
 echo "   Política ILM: $ILM_EXISTS"
@@ -1358,7 +1373,7 @@ Los pods de Fluentd están Running pero no aparecen índices `kubernetes-*` en E
 # Verificar que Elasticsearch está accesible desde el namespace logging
 kubectl run test-es --rm -it --restart=Never -n logging \
   --image=curlimages/curl:8.5.0 -- \
-  curl -s -u elastic:ElasticK8s2024! http://elasticsearch-master:9200/_cluster/health
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://elasticsearch-master:9200/_cluster/health
 
 # Si Elasticsearch está healthy, reiniciar Fluentd para limpiar buffers
 kubectl rollout restart daemonset/fluentd -n logging
@@ -1369,7 +1384,7 @@ kubectl rollout status daemonset/fluentd -n logging --timeout=120s
 # Verificar que los índices empiezan a crearse (esperar ~30s)
 sleep 30
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u elastic:ElasticK8s2024! 'http://localhost:9200/_cat/indices?v' | grep kubernetes
+  curl -s -u "elastic:${ELASTIC_PASSWORD}" 'http://localhost:9200/_cat/indices?v' | grep kubernetes
 ```
 
 ---

@@ -33,7 +33,7 @@ En este laboratorio implementarás una capa completa de governance sobre el clú
 ### Acceso y Herramientas
 
 - Clúster `kind-lab-calico` activo con contexto `kind-lab-calico`
-- Helm 3.15.2 instalado
+- Helm 3.20.x instalado
 - Registry local en `localhost:5000`
 - Prometheus operativo en namespace `monitoring` (Lab 05)
 - Acceso a Internet para descargar charts de Helm
@@ -47,7 +47,7 @@ En este laboratorio implementarás una capa completa de governance sobre el clú
 | OPA Gatekeeper | 3.16.3 | Motor de políticas con CRDs |
 | Kyverno | 1.12.5 | Políticas en YAML nativo |
 | OPA CLI | 0.66.0 | Testing local de políticas Rego |
-| Helm | 3.15.2 | Instalación de charts |
+| Helm | 3.20.x | Instalación de charts |
 | Prometheus | 2.53.0 | Métricas de compliance |
 
 ### Preparación Inicial
@@ -514,7 +514,7 @@ spec:
       - gatekeeper-system
       - kyverno
       - monitoring
-      - ingress-nginx
+      - traefik
       - cert-manager
       - local-path-storage
   parameters:
@@ -940,7 +940,7 @@ spec:
                 - gatekeeper-system
                 - kyverno
                 - monitoring
-                - ingress-nginx
+                - traefik
                 - cert-manager
                 - local-path-storage
                 - calico-system

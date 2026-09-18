@@ -42,10 +42,10 @@ En este laboratorio se implementarán políticas avanzadas de scheduling sobre e
 
 | Componente | Versión | Propósito |
 |------------|---------|-----------|
-| Kubernetes (kind) | 1.30.2 | Clúster de trabajo |
-| kube-scheduler | v1.30.2 | Imagen para scheduler personalizado |
-| kubectl | 1.30.2 | Gestión del clúster |
-| kind | 0.23.0 | Infraestructura de clúster |
+| Kubernetes (kind) | 1.35.8 | Clúster de trabajo |
+| kube-scheduler | v1.35.8 | Imagen para scheduler personalizado |
+| kubectl | 1.35.x | Gestión del clúster |
+| kind | 0.33.0 | Infraestructura de clúster |
 
 ### Preparación del directorio de trabajo
 
@@ -59,6 +59,7 @@ cd ~/k8s-labs/lab03
 ```bash
 # Cambiar al contexto correcto
 kubectl cluster-info --context kind-lab-calico
+export KUBE_CONTEXT=kind-lab-calico
 
 # Verificar nodos disponibles
 kubectl get nodes -o wide
@@ -68,9 +69,9 @@ kubectl get nodes -o wide
 
 ```
 NAME                       STATUS   ROLES           AGE   VERSION
-lab-calico-control-plane   Ready    control-plane   ...   v1.30.2
-lab-calico-worker          Ready    <none>          ...   v1.30.2
-lab-calico-worker2         Ready    <none>          ...   v1.30.2
+lab-calico-control-plane   Ready    control-plane   ...   v1.35.8
+lab-calico-worker          Ready    <none>          ...   v1.35.8
+lab-calico-worker2         Ready    <none>          ...   v1.35.8
 ```
 
 ---
@@ -109,9 +110,9 @@ kubectl get nodes -L topology.kubernetes.io/zone,node-type
 
 ```
 NAME                       STATUS   ROLES           AGE   VERSION   ZONE     NODE-TYPE
-lab-calico-control-plane   Ready    control-plane   ...   v1.30.2            
-lab-calico-worker          Ready    <none>          ...   v1.30.2   zone-a   compute
-lab-calico-worker2         Ready    <none>          ...   v1.30.2   zone-b   memory
+lab-calico-control-plane   Ready    control-plane   ...   v1.35.8
+lab-calico-worker          Ready    <none>          ...   v1.35.8   zone-a   compute
+lab-calico-worker2         Ready    <none>          ...   v1.35.8   zone-b   memory
 ```
 
 ### Verificación
@@ -135,13 +136,13 @@ kubectl get node lab-calico-worker2 -o jsonpath='{.metadata.labels.node-type}'
 1. Aplicar taint al worker de compute:
 
 ```bash
-kubectl taint nodes lab-calico-worker workload-type=compute:NoSchedule
+kubectl taint nodes lab-calico-worker workload-type=compute:NoSchedule --overwrite
 ```
 
 2. Aplicar taint al worker de memory:
 
 ```bash
-kubectl taint nodes lab-calico-worker2 workload-type=memory:NoSchedule
+kubectl taint nodes lab-calico-worker2 workload-type=memory:NoSchedule --overwrite
 ```
 
 3. Verificar los taints:
@@ -172,7 +173,7 @@ El pod debe quedar en estado `Pending` porque no tiene tolerations para ningún 
 
 ```bash
 # Limpiar pod de prueba
-kubectl delete pod taint-test -n default --force 2>/dev/null
+kubectl delete pod taint-test -n default --ignore-not-found --timeout=30s
 ```
 
 ---
@@ -770,7 +771,7 @@ spec:
       serviceAccountName: custom-scheduler-sa
       containers:
         - name: kube-scheduler
-          image: registry.k8s.io/kube-scheduler:v1.30.2
+          image: registry.k8s.io/kube-scheduler:v1.35.8
           command:
             - kube-scheduler
             - --config=/etc/kubernetes/config.yaml

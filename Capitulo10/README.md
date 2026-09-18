@@ -34,9 +34,9 @@ Este laboratorio culminante integra los componentes desplegados en los Labs 01-0
 | Herramienta | Versión | Verificación |
 |-------------|---------|--------------|
 | Velero CLI | 1.14.0 | `velero version --client-only` |
-| kind | 0.23.0 | `kind version` |
-| kubectl | 1.30.2 | `kubectl version --client` |
-| Helm | 3.15.2 | `helm version --short` |
+| kind | 0.33.0 | `kind version` |
+| kubectl | 1.35.x | `kubectl version --client` |
+| Helm | 3.20.x | `helm version --short` |
 | Docker Engine | 26.1.4 | `docker version` |
 
 ## Entorno del Laboratorio
@@ -261,7 +261,7 @@ networking:
   serviceSubnet: "10.96.0.0/16"
 nodes:
   - role: control-plane
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
     extraPortMappings:
       - containerPort: 30080
         hostPort: 30080
@@ -270,9 +270,9 @@ nodes:
         hostPort: 30443
         protocol: TCP
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
 containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
@@ -322,7 +322,7 @@ docker network connect kind $(docker ps --filter "name=lab-calico-control-plane"
 
 ```
 Creating cluster "lab-dr" ...
- ✓ Ensuring node image (kindest/node:v1.30.2) 🖼
+ ✓ Ensuring node image (kindest/node:v1.35.8) 🖼
  ✓ Preparing nodes 📦 📦 📦
  ✓ Writing configuration 📜
  ✓ Starting control-plane 🕹️
@@ -622,7 +622,7 @@ BACKUP_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 DR_BACKUP_NAME="dr-exercise-${BACKUP_TIMESTAMP}"
 
 velero backup create ${DR_BACKUP_NAME} \
-  --include-namespaces webapp,monitoring,ingress-nginx \
+  --include-namespaces webapp,monitoring,traefik \
   --labels exercise=dr-test,type=full \
   --wait
 
@@ -645,12 +645,12 @@ Namespace:    velero
 Labels:       exercise=dr-test
               type=full
               velero.io/storage-location=default
-Annotations:  velero.io/source-cluster-k8s-gitversion=v1.30.2
+Annotations:  velero.io/source-cluster-k8s-gitversion=v1.35.8
 
 Phase:  Completed
 
 Namespaces:
-  Included:  webapp, monitoring, ingress-nginx
+  Included:  webapp, monitoring, traefik
   Excluded:  <none>
 
 Resources:
@@ -1155,7 +1155,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
       ports:
         - protocol: TCP
           port: 80

@@ -33,8 +33,8 @@ En esta práctica diseñarás un Helm chart avanzado para la aplicación `webapp
 
 | Componente | Versión | Estado requerido |
 |---|---|---|
-| Clúster `lab-calico` (kind) | 1.30.2 | Corriendo con webapp desplegada |
-| Helm | 3.15.2 | Instalado con plugins |
+| Clúster `lab-calico` (kind) | kind 0.33.0 / K8s 1.35.8 | Corriendo con webapp desplegada |
+| Helm | 3.20.x | Instalado con plugins |
 | helm-unittest | 0.5.1 | Plugin instalado |
 | chart-testing (ct) | 3.11.0 | Binario en PATH |
 | Tekton Pipelines | 0.61.0 | Aplicado al clúster |
@@ -51,12 +51,14 @@ En esta práctica diseñarás un Helm chart avanzado para la aplicación `webapp
 ```bash
 mkdir -p ~/k8s-labs/lab07/{charts/webapp,pipeline,tests}
 cd ~/k8s-labs/lab07
+export KUBE_CONTEXT="${KUBE_CONTEXT:-kind-lab-calico}"
+kubectl config use-context "$KUBE_CONTEXT"
 ```
 
 ### Verificar estado del clúster y servicios
 
 ```bash
-kubectl cluster-info --context kind-lab-calico
+kubectl cluster-info --context "$KUBE_CONTEXT"
 kubectl get pods -n helm-registry
 kubectl get pods -n gitea
 kubectl get pods -n tekton-pipelines
@@ -79,6 +81,7 @@ helm repo update
 ```bash
 kubectl port-forward svc/gitea-http -n gitea 3000:3000 &
 export GITEA_URL=http://localhost:3000
+export GITEA_ADMIN_PASSWORD="${GITEA_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
 ```
 
 ---
@@ -988,7 +991,7 @@ Debe mostrar 3 (versiones 1.0.0, 1.1.0, 1.2.0).
 ```bash
 curl -X POST "$GITEA_URL/api/v1/user/repos" \
   -H "Content-Type: application/json" \
-  -u "gitea-admin:Gitea2024!" \
+  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
   -d '{
     "name": "webapp-chart",
     "description": "Helm chart para webapp",
@@ -1001,7 +1004,7 @@ curl -X POST "$GITEA_URL/api/v1/user/repos" \
 
 ```bash
 cd ~/k8s-labs/lab07
-git clone http://gitea-admin:Gitea2024!@localhost:3000/gitea-admin/webapp-chart.git repo-webapp-chart
+git clone http://gitea-admin:${GITEA_ADMIN_PASSWORD}@localhost:3000/gitea-admin/webapp-chart.git repo-webapp-chart
 cp -r charts/webapp/* repo-webapp-chart/
 cd repo-webapp-chart
 git add -A
@@ -1032,7 +1035,7 @@ To http://localhost:3000/gitea-admin/webapp-chart.git
 
 ```bash
 curl -s "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart" \
-  -u "gitea-admin:Gitea2024!" | python3 -m json.tool | grep '"name"'
+  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" | python3 -m json.tool | grep '"name"'
 ```
 
 ---
@@ -1114,8 +1117,13 @@ spec:
       script: |
         #!/bin/sh
         set -ex
-        cd $(workspaces.output.path)
-        rm -rf *
+        WORKDIR="$(workspaces.output.path)"
+        case "$WORKDIR" in
+          /workspace/*) ;;
+          *) echo "Workspace inesperado: $WORKDIR" >&2; exit 1 ;;
+        esac
+        cd "$WORKDIR"
+        find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
         git clone $(params.repo-url) .
         git checkout $(params.revision)
         echo "Clonado $(params.repo-url) en revision $(params.revision)"
@@ -1138,7 +1146,7 @@ spec:
     - name: source
   steps:
     - name: lint
-      image: alpine/helm:3.15.2
+      image: alpine/helm:3.20.0
       script: |
         #!/bin/sh
         set -ex
@@ -1194,7 +1202,7 @@ spec:
     - name: source
   steps:
     - name: package-and-push
-      image: alpine/helm:3.15.2
+      image: alpine/helm:3.20.0
       script: |
         #!/bin/sh
         set -ex
@@ -1246,7 +1254,7 @@ spec:
     - name: source
   steps:
     - name: upgrade
-      image: alpine/helm:3.15.2
+      image: alpine/helm:3.20.0
       script: |
         #!/bin/sh
         set -ex
@@ -1489,7 +1497,7 @@ EL_SVC=$(kubectl get svc -n webapp -l eventlistener=webapp-chart-listener -o jso
 
 curl -X POST "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks" \
   -H "Content-Type: application/json" \
-  -u "gitea-admin:Gitea2024!" \
+  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
   -d "{
     \"type\": \"gitea\",
     \"active\": true,
@@ -1699,11 +1707,11 @@ echo "URL correcta: http://${EL_SVC_NAME}.webapp.svc.cluster.local:8080"
 
 # Listar hooks y actualizar
 HOOK_ID=$(curl -s "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks" \
-  -u "gitea-admin:Gitea2024!" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
 
 curl -X PATCH "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks/$HOOK_ID" \
   -H "Content-Type: application/json" \
-  -u "gitea-admin:Gitea2024!" \
+  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
   -d "{\"config\": {\"url\": \"http://${EL_SVC_NAME}.webapp.svc.cluster.local:8080\", \"content_type\": \"json\"}}"
 ```
 

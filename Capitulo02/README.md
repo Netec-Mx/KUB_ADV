@@ -12,14 +12,14 @@
 
 ## Descripción General
 
-En este laboratorio se instala NGINX Ingress Controller y cert-manager sobre el clúster `lab-calico` creado en el Lab 01, se despliega una aplicación multi-tier de referencia (`webapp`) y se configura el acceso externo con TLS gestionado automáticamente. Adicionalmente, se implementa la Gateway API como alternativa moderna al recurso Ingress, incluyendo enrutamiento basado en path, headers y despliegues canary.
+En este laboratorio se instala Traefik Proxy y cert-manager sobre el clúster `lab-calico` creado en el Lab 01, se despliega una aplicación multi-tier de referencia (`webapp`) y se configura el acceso externo con TLS gestionado automáticamente. Traefik procesa recursos Ingress estándar y Gateway API; esta última se prueba con `HTTPRoute`, rutas por path, headers y ponderación canary.
 
 ## Objetivos de Aprendizaje
 
-- [ ] Instalar y configurar NGINX Ingress Controller 1.10.1 con acceso via hostPort en el clúster kind
+- [ ] Instalar y configurar Traefik Proxy 3.7.13 con acceso desde el host por NodePort publicado por kind
 - [ ] Desplegar cert-manager 1.15.1 y crear ClusterIssuers (self-signed, CA) para gestión automatizada de certificados TLS
 - [ ] Configurar recursos Ingress con terminación TLS usando certificados emitidos por cert-manager
-- [ ] Implementar Gateway API 1.1.0 con HTTPRoute como alternativa al recurso Ingress clásico
+- [ ] Implementar Gateway API 1.6.1 con HTTPRoute como alternativa al recurso Ingress clásico
 - [ ] Aplicar políticas de enrutamiento avanzadas: path-based, header-based y canary deployments
 
 ## Prerrequisitos
@@ -34,9 +34,9 @@ En este laboratorio se instala NGINX Ingress Controller y cert-manager sobre el 
 
 | Componente | Versión | Verificación |
 |------------|---------|--------------|
-| Clúster lab-calico | kind 0.23.0 / K8s 1.30.2 | `kubectl cluster-info --context kind-lab-calico` |
-| Helm | 3.15.2 | `helm version --short` |
-| kubectl | 1.30.2 | `kubectl version --client --short` |
+| Clúster lab-calico | kind 0.33.0 / K8s 1.35.x | `kubectl cluster-info --context kind-lab-calico` |
+| Helm | 3.20.x o posterior compatible | `helm version --short` |
+| kubectl | 1.35.x | `kubectl version --client --short` |
 | OpenSSL | 3.0.13+ | `openssl version` |
 | Acceso root a /etc/hosts | — | `sudo test -w /etc/hosts && echo OK` |
 
@@ -52,7 +52,7 @@ En este laboratorio se instala NGINX Ingress Controller y cert-manager sobre el 
 │   ├── certs/
 │   └── gateway/
 └── values/
-    ├── ingress-nginx-values.yaml
+    ├── traefik-values.yaml
     └── cert-manager-values.yaml
 ```
 
@@ -72,10 +72,12 @@ En este laboratorio se instala NGINX Ingress Controller y cert-manager sobre el 
 
 **Instrucciones:**
 
-1. Cambiar al contexto del clúster:
+1. Definir el contexto para no depender del contexto activo de otra práctica:
 
 ```bash
-kubectl config use-context kind-lab-calico
+export KUBE_CONTEXT=kind-lab-calico
+kubectl cluster-info --context "$KUBE_CONTEXT"
+kubectl config use-context "$KUBE_CONTEXT"
 ```
 
 2. Crear la estructura de directorios:
@@ -88,96 +90,100 @@ cd ~/k8s-labs/lab02
 3. Verificar que todos los nodos están Ready:
 
 ```bash
-kubectl get nodes -o wide
+kubectl get nodes -o wide --context "$KUBE_CONTEXT"
 ```
 
 4. Verificar que Calico está operativo:
 
 ```bash
-kubectl get pods -n kube-system -l k8s-app=calico-node
+kubectl get pods -n calico-system --context "$KUBE_CONTEXT"
 ```
 
 **Salida esperada:**
 
 ```
 NAME                                  STATUS   ROLES           AGE   VERSION
-lab-calico-control-plane              Ready    control-plane   ...   v1.30.2
-lab-calico-worker                     Ready    <none>          ...   v1.30.2
-lab-calico-worker2                    Ready    <none>          ...   v1.30.2
+lab-calico-control-plane              Ready    control-plane   ...   v1.35.x
+lab-calico-worker                     Ready    <none>          ...   v1.35.x
+lab-calico-worker2                    Ready    <none>          ...   v1.35.x
 ```
 
 **Verificación:**
 
 ```bash
-kubectl get nodes --no-headers | awk '{print $2}' | sort -u
+kubectl get nodes --context "$KUBE_CONTEXT" --no-headers | awk '{print $2}' | sort -u
 # Debe mostrar solo: Ready
 ```
 
 ---
 
-### Paso 2: Instalar NGINX Ingress Controller via Helm
+### Paso 2: Instalar Traefik Proxy con Ingress y Gateway API
 
-**Objetivo:** Desplegar NGINX Ingress Controller 1.10.1 con hostPort habilitado para acceso directo desde el host.
+**Objetivo:** Desplegar Traefik Proxy 3.7.13, un controlador mantenido que implementa Ingress y Gateway API. El Lab 01 ya publica los NodePorts 30080 y 30443 en los puertos 80 y 443 del host.
 
 **Instrucciones:**
 
-1. Añadir el repositorio Helm (si no existe):
+1. Instalar los CRDs Gateway API antes del controlador:
 
 ```bash
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo update
+kubectl apply --context "$KUBE_CONTEXT" \
+  -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
+kubectl wait --context "$KUBE_CONTEXT" --for=condition=Established \
+  crd/gatewayclasses.gateway.networking.k8s.io --timeout=90s
 ```
 
-2. Crear el archivo de valores personalizado:
+2. Añadir el repositorio Helm y crear valores fijados:
 
 ```bash
-cat > ~/k8s-labs/lab02/values/ingress-nginx-values.yaml << 'EOF'
-controller:
-  image:
-    tag: "v1.10.1"
-  hostPort:
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+cat > ~/k8s-labs/lab02/values/traefik-values.yaml << 'EOF'
+service:
+  type: NodePort
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    nodePort: 30080
+  websecure:
+    port: 8443
+    exposedPort: 443
+    nodePort: 30443
+providers:
+  kubernetesIngress:
     enabled: true
-  service:
-    type: NodePort
-  nodeSelector:
-    ingress-ready: "true"
-  tolerations:
-    - key: "node-role.kubernetes.io/control-plane"
-      operator: "Equal"
-      effect: "NoSchedule"
-  watchIngressWithoutClass: true
-  ingressClassResource:
-    name: nginx
-    default: true
-  config:
-    use-forwarded-headers: "true"
-    compute-full-forwarded-for: "true"
-  admissionWebhooks:
+  kubernetesGateway:
     enabled: true
+metrics:
+  prometheus:
+    enabled: true
+gateway:
+  listeners:
+    web:
+      namespacePolicy:
+        from: All
+    websecure:
+      namespacePolicy:
+        from: All
 EOF
 ```
 
-3. Etiquetar el nodo control-plane para el Ingress Controller:
+3. Instalar el chart fijado y esperar al controlador:
 
 ```bash
-kubectl label node lab-calico-control-plane ingress-ready=true --overwrite
-```
-
-4. Instalar el chart:
-
-```bash
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
+helm install traefik traefik/traefik \
+  --namespace traefik \
   --create-namespace \
-  --version 4.10.1 \
-  --values ~/k8s-labs/lab02/values/ingress-nginx-values.yaml \
-  --wait --timeout 120s
+  --version 41.6.0 \
+  --values ~/k8s-labs/lab02/values/traefik-values.yaml \
+  --kube-context "$KUBE_CONTEXT" \
+  --wait --timeout 180s
 ```
 
 **Salida esperada:**
 
 ```
-NAME: ingress-nginx
+NAME: traefik
 ...
 STATUS: deployed
 ```
@@ -185,11 +191,18 @@ STATUS: deployed
 **Verificación:**
 
 ```bash
-kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller
-kubectl get ingressclass
+kubectl get pods -n traefik --context "$KUBE_CONTEXT"
+kubectl get ingressclass,gatewayclass --context "$KUBE_CONTEXT"
+kubectl get svc -n traefik --context "$KUBE_CONTEXT"
 ```
 
-El pod debe estar en estado `Running` y la IngressClass `nginx` debe aparecer como default.
+El pod debe estar en estado `Running`. El chart crea la `GatewayClass` `traefik` con `controllerName: traefik.io/gateway-controller`; comprueba ese valor antes de continuar:
+
+```bash
+kubectl get gatewayclass traefik --context "$KUBE_CONTEXT" \
+  -o jsonpath='{.spec.controllerName}{"\\n"}'
+# Debe imprimir: traefik.io/gateway-controller
+```
 
 ---
 
@@ -329,7 +342,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: wildcard-lab-local
-  namespace: ingress-nginx
+  namespace: traefik
 spec:
   secretName: wildcard-lab-local-tls
   duration: 8760h  # 1 año
@@ -367,7 +380,7 @@ Esperar hasta que la columna READY muestre `True` para ambos certificados:
 
 ```bash
 kubectl wait --for=condition=Ready certificate/lab-ca -n cert-manager --timeout=60s
-kubectl wait --for=condition=Ready certificate/wildcard-lab-local -n ingress-nginx --timeout=60s
+kubectl wait --for=condition=Ready certificate/wildcard-lab-local -n traefik --timeout=60s
 ```
 
 ---
@@ -662,36 +675,17 @@ Todos los pods deben estar en estado `Running` (7 pods en total: 2 frontend + 2 
 
 ### Paso 6: Configurar entradas DNS locales
 
-**Objetivo:** Añadir entradas en /etc/hosts para resolver los dominios del laboratorio hacia localhost.
-
-**Instrucciones:**
-
-1. Obtener la IP del nodo control-plane (en kind, el tráfico hostPort se expone en el contenedor Docker):
+**Objetivo:** Resolver los dominios del laboratorio hacia el host. El Lab 01 mapea los NodePorts de Traefik a los puertos 80 y 443 de `localhost`.
 
 ```bash
-INGRESS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' lab-calico-control-plane)
-echo "IP del Ingress: $INGRESS_IP"
-```
-
-2. Añadir entradas a /etc/hosts:
-
-```bash
-sudo tee -a /etc/hosts > /dev/null << EOF
+sudo tee -a /etc/hosts > /dev/null << 'EOF'
 # Lab 02 - Kubernetes Ingress/Gateway
-${INGRESS_IP} webapp.lab.local
-${INGRESS_IP} api.lab.local
-${INGRESS_IP} backend.lab.local
-127.0.0.1 webapp.lab.local api.lab.local backend.lab.local
+127.0.0.1 webapp.lab.local api.lab.local gateway.lab.local backend.lab.local
 EOF
+getent hosts webapp.lab.local
 ```
 
-> **Nota:** Se añade también `127.0.0.1` como fallback. En kind con hostPort, el puerto 80/443 se mapea al host. Usaremos `curl --resolve` para pruebas directas contra la IP del contenedor.
-
-**Verificación:**
-
-```bash
-grep "lab.local" /etc/hosts
-```
+Si el puerto 80 o 443 ya está ocupado en el host, no cambies el manifiesto a ciegas: libera ese puerto o recrea `lab-calico` con puertos alternativos y actualiza las pruebas de este laboratorio.
 
 ---
 
@@ -711,11 +705,9 @@ metadata:
   name: webapp-ingress
   namespace: webapp
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     cert-manager.io/cluster-issuer: "lab-ca-issuer"
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - webapp.lab.local
@@ -756,7 +748,7 @@ EOF
 kubectl apply -f ~/k8s-labs/lab02/manifests/ingress/webapp-ingress.yaml
 ```
 
-2. Crear el Ingress para el dominio api.lab.local con rewrite:
+2. Crear el Ingress para el dominio `api.lab.local`:
 
 ```bash
 cat > ~/k8s-labs/lab02/manifests/ingress/api-ingress.yaml << 'EOF'
@@ -766,11 +758,9 @@ metadata:
   name: api-ingress
   namespace: webapp
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
     cert-manager.io/cluster-issuer: "lab-ca-issuer"
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - api.lab.local
@@ -779,15 +769,15 @@ spec:
     - host: api.lab.local
       http:
         paths:
-          - path: /v1(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /v1
+            pathType: Prefix
             backend:
               service:
                 name: webapp-api
                 port:
                   number: 80
-          - path: /v2(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /v2
+            pathType: Prefix
             backend:
               service:
                 name: webapp-api
@@ -815,112 +805,31 @@ api-tls      True    api-tls      ...
 **Verificación:**
 
 ```bash
-# Probar acceso HTTP (debe redirigir a HTTPS)
-INGRESS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' lab-calico-control-plane)
-
 # Probar el frontend
-curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} https://webapp.lab.local/ | head -5
+curl --cacert <(kubectl get secret lab-ca-secret -n cert-manager -o jsonpath='{.data.ca\.crt}' | base64 -d) \
+  https://webapp.lab.local/ | head -5
 
 # Probar la API
-curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} https://webapp.lab.local/api/v1/
+curl --cacert <(kubectl get secret lab-ca-secret -n cert-manager -o jsonpath='{.data.ca\.crt}' | base64 -d) \
+  https://webapp.lab.local/api/v1/
 
 # Verificar el certificado TLS
-echo | openssl s_client -connect ${INGRESS_IP}:443 -servername webapp.lab.local 2>/dev/null | openssl x509 -noout -subject -issuer
+echo | openssl s_client -connect webapp.lab.local:443 -servername webapp.lab.local 2>/dev/null | openssl x509 -noout -subject -issuer
 ```
 
 ---
 
-### Paso 8: Configurar Canary Deployment via Ingress Annotations
+### Paso 8: Configurar Gateway API, canary y rutas por header
 
-**Objetivo:** Implementar un despliegue canary usando anotaciones de NGINX Ingress para enviar un porcentaje del tráfico al servicio canary.
+**Objetivo:** Configurar un Gateway administrado por Traefik. La ponderación y el match por header pertenecen a `HTTPRoute`; no se trasladan anotaciones exclusivas de ingress-nginx a otro controlador.
 
-**Instrucciones:**
-
-1. Crear el Ingress canary:
+1. La `GatewayClass` ya fue creada por el chart. No crees una segunda clase con un `controllerName` inventado:
 
 ```bash
-cat > ~/k8s-labs/lab02/manifests/ingress/canary-ingress.yaml << 'EOF'
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: webapp-api-canary
-  namespace: webapp
-  annotations:
-    nginx.ingress.kubernetes.io/canary: "true"
-    nginx.ingress.kubernetes.io/canary-weight: "20"
-    nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
-    nginx.ingress.kubernetes.io/canary-by-header-value: "always"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: webapp.lab.local
-      http:
-        paths:
-          - path: /api/v1
-            pathType: Prefix
-            backend:
-              service:
-                name: webapp-api-canary
-                port:
-                  number: 80
-EOF
-kubectl apply -f ~/k8s-labs/lab02/manifests/ingress/canary-ingress.yaml
+kubectl get gatewayclass traefik -o yaml
 ```
 
-**Verificación:**
-
-```bash
-INGRESS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' lab-calico-control-plane)
-
-# Tráfico normal (80% stable, 20% canary)
-for i in $(seq 1 10); do
-  curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} https://webapp.lab.local/api/v1/ 2>/dev/null
-  echo ""
-done
-
-# Forzar canary con header
-curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} \
-  -H "X-Canary: always" \
-  https://webapp.lab.local/api/v1/
-```
-
-Se debe observar que aproximadamente 2 de cada 10 requests devuelven `v2-canary`, y que el header `X-Canary: always` siempre enruta al canary.
-
----
-
-### Paso 9: Instalar Gateway API CRDs e implementar HTTPRoute
-
-**Objetivo:** Instalar los CRDs de Gateway API 1.1.0 y configurar un Gateway con HTTPRoute como alternativa moderna al recurso Ingress.
-
-**Instrucciones:**
-
-1. Instalar los CRDs de Gateway API:
-
-```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
-```
-
-2. Verificar la instalación de CRDs:
-
-```bash
-kubectl get crds | grep gateway.networking.k8s.io
-```
-
-3. Crear el GatewayClass que usa NGINX como controlador:
-
-```bash
-cat > ~/k8s-labs/lab02/manifests/gateway/gatewayclass.yaml << 'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: nginx
-spec:
-  controllerName: k8s.io/ingress-nginx
-EOF
-kubectl apply -f ~/k8s-labs/lab02/manifests/gateway/gatewayclass.yaml
-```
-
-4. Crear el recurso Gateway:
+2. Crear el Gateway TLS. El certificado wildcard se encuentra en el mismo namespace `traefik`:
 
 ```bash
 cat > ~/k8s-labs/lab02/manifests/gateway/gateway.yaml << 'EOF'
@@ -928,19 +837,16 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: lab-gateway
-  namespace: ingress-nginx
+  namespace: traefik
 spec:
-  gatewayClassName: nginx
+  gatewayClassName: traefik
   listeners:
     - name: http
       protocol: HTTP
       port: 80
       allowedRoutes:
         namespaces:
-          from: Selector
-          selector:
-            matchLabels:
-              entorno: produccion
+          from: All
     - name: https
       protocol: HTTPS
       port: 443
@@ -951,15 +857,12 @@ spec:
             kind: Secret
       allowedRoutes:
         namespaces:
-          from: Selector
-          selector:
-            matchLabels:
-              entorno: produccion
+          from: All
 EOF
 kubectl apply -f ~/k8s-labs/lab02/manifests/gateway/gateway.yaml
 ```
 
-5. Crear HTTPRoutes para la webapp:
+3. Crear HTTPRoutes en el namespace de la aplicación. `gateway.lab.local` evita solapar las rutas demostradas con Ingress en `webapp.lab.local` y `api.lab.local`:
 
 ```bash
 cat > ~/k8s-labs/lab02/manifests/gateway/httproutes.yaml << 'EOF'
@@ -972,10 +875,10 @@ metadata:
 spec:
   parentRefs:
     - name: lab-gateway
-      namespace: ingress-nginx
+      namespace: traefik
       sectionName: https
   hostnames:
-    - "webapp.lab.local"
+    - "gateway.lab.local"
   rules:
     - matches:
         - path:
@@ -993,15 +896,15 @@ metadata:
 spec:
   parentRefs:
     - name: lab-gateway
-      namespace: ingress-nginx
+      namespace: traefik
       sectionName: https
   hostnames:
-    - "api.lab.local"
+    - "gateway.lab.local"
   rules:
     - matches:
         - path:
             type: PathPrefix
-            value: /v1
+            value: /api/v1
       backendRefs:
         - name: webapp-api
           port: 80
@@ -1012,7 +915,7 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /v2
+            value: /api/v2
       backendRefs:
         - name: webapp-api
           port: 80
@@ -1025,18 +928,18 @@ metadata:
 spec:
   parentRefs:
     - name: lab-gateway
-      namespace: ingress-nginx
+      namespace: traefik
       sectionName: https
   hostnames:
-    - "api.lab.local"
+    - "gateway.lab.local"
   rules:
     - matches:
         - headers:
-            - name: X-Version
-              value: canary
+            - name: X-Canary
+              value: always
           path:
             type: PathPrefix
-            value: /v1
+            value: /api/v1
       backendRefs:
         - name: webapp-api-canary
           port: 80
@@ -1047,7 +950,6 @@ kubectl apply -f ~/k8s-labs/lab02/manifests/gateway/httproutes.yaml
 **Salida esperada:**
 
 ```
-gatewayclass.gateway.networking.k8s.io/nginx created
 gateway.gateway.networking.k8s.io/lab-gateway created
 httproute.gateway.networking.k8s.io/webapp-frontend-route created
 httproute.gateway.networking.k8s.io/webapp-api-route created
@@ -1058,68 +960,31 @@ httproute.gateway.networking.k8s.io/webapp-header-route created
 
 ```bash
 # Verificar el estado del Gateway
-kubectl get gateway -n ingress-nginx
+kubectl get gateway -n traefik
 
 # Verificar las HTTPRoutes
 kubectl get httproutes -n webapp
 
 # Verificar que las rutas están aceptadas
-kubectl describe httproute webapp-api-route -n webapp | grep -A5 "Status:"
+kubectl wait --for=condition=Accepted gateway/lab-gateway -n traefik --timeout=120s
+kubectl wait --for=condition=Accepted httproute/webapp-api-route -n webapp --timeout=120s
+kubectl get httproute webapp-api-route -n webapp -o yaml
 ```
 
-> **Nota:** El soporte de Gateway API en NGINX Ingress Controller 1.10.1 es experimental/beta. Los recursos se crean correctamente pero el enrutamiento efectivo puede requerir la versión del controlador con feature gate habilitado. Los recursos quedan declarados para uso con controladores compatibles en labs futuros.
-
----
-
-### Paso 10: Verificar enrutamiento basado en headers
-
-**Objetivo:** Demostrar el enrutamiento basado en headers como política avanzada, tanto con Ingress annotations como con Gateway API.
-
-**Instrucciones:**
-
-1. Crear un Ingress adicional con enrutamiento por header (complementario al canary):
+4. Verificar tráfico Gateway. Ejecuta varias solicitudes para observar la ponderación; el header debe seleccionar siempre el canary:
 
 ```bash
-cat > ~/k8s-labs/lab02/manifests/ingress/header-routing-ingress.yaml << 'EOF'
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: webapp-header-routing
-  namespace: webapp
-  annotations:
-    nginx.ingress.kubernetes.io/canary: "true"
-    nginx.ingress.kubernetes.io/canary-by-header: "X-Backend-Override"
-    nginx.ingress.kubernetes.io/canary-by-header-value: "backend-v2"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: webapp.lab.local
-      http:
-        paths:
-          - path: /backend
-            pathType: Prefix
-            backend:
-              service:
-                name: webapp-api-canary
-                port:
-                  number: 80
-EOF
-kubectl apply -f ~/k8s-labs/lab02/manifests/ingress/header-routing-ingress.yaml
+CA_FILE=$(mktemp)
+kubectl get secret lab-ca-secret -n cert-manager -o jsonpath='{.data.ca\.crt}' | base64 -d > "$CA_FILE"
+for i in $(seq 1 10); do
+  curl --cacert "$CA_FILE" https://gateway.lab.local/api/v1/
+  echo
+done
+curl --cacert "$CA_FILE" -H 'X-Canary: always' https://gateway.lab.local/api/v1/
+rm -f "$CA_FILE"
 ```
 
-**Verificación:**
-
-```bash
-INGRESS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' lab-calico-control-plane)
-
-# Sin header - va al backend normal
-curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} https://webapp.lab.local/backend/
-
-# Con header - va al canary
-curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} \
-  -H "X-Backend-Override: backend-v2" \
-  https://webapp.lab.local/backend/
-```
+El reparto 80/20 es probabilístico; no se usa el conteo de diez solicitudes como una garantía exacta. El caso con header sí debe llegar al backend `v2-canary`.
 
 ---
 
@@ -1130,20 +995,19 @@ Ejecutar el siguiente script de validación completa:
 ```bash
 #!/bin/bash
 echo "=== Validación Lab 02 ==="
-INGRESS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' lab-calico-control-plane)
 PASS=0
 FAIL=0
 
-# Test 1: NGINX Ingress Controller running
-echo -n "[1/8] NGINX Ingress Controller: "
-if kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller --no-headers | grep -q Running; then
+# Test 1: Traefik controller running
+echo -n "[1/9] Traefik operativo: "
+if kubectl get pods -n traefik --no-headers | awk '$3 == "Running" { found=1 } END { exit !found }'; then
   echo "PASS"; ((PASS++))
 else
   echo "FAIL"; ((FAIL++))
 fi
 
 # Test 2: cert-manager pods running
-echo -n "[2/8] cert-manager operativo: "
+echo -n "[2/9] cert-manager operativo: "
 CM_READY=$(kubectl get pods -n cert-manager --no-headers | grep Running | wc -l)
 if [ "$CM_READY" -ge 3 ]; then
   echo "PASS"; ((PASS++))
@@ -1152,7 +1016,7 @@ else
 fi
 
 # Test 3: ClusterIssuers ready
-echo -n "[3/8] ClusterIssuers configurados: "
+echo -n "[3/9] ClusterIssuers configurados: "
 ISSUERS=$(kubectl get clusterissuers --no-headers | grep True | wc -l)
 if [ "$ISSUERS" -ge 2 ]; then
   echo "PASS ($ISSUERS issuers)"; ((PASS++))
@@ -1161,15 +1025,15 @@ else
 fi
 
 # Test 4: Wildcard certificate ready
-echo -n "[4/8] Certificado wildcard: "
-if kubectl get certificate wildcard-lab-local -n ingress-nginx -o jsonpath='{.status.conditions[0].status}' | grep -q True; then
+echo -n "[4/9] Certificado wildcard: "
+if kubectl get certificate wildcard-lab-local -n traefik -o jsonpath='{.status.conditions[0].status}' | grep -q True; then
   echo "PASS"; ((PASS++))
 else
   echo "FAIL"; ((FAIL++))
 fi
 
 # Test 5: Webapp pods running
-echo -n "[5/8] Webapp pods (7 expected): "
+echo -n "[5/9] Webapp pods (7 expected): "
 WEBAPP_PODS=$(kubectl get pods -n webapp --no-headers | grep Running | wc -l)
 if [ "$WEBAPP_PODS" -ge 7 ]; then
   echo "PASS ($WEBAPP_PODS pods)"; ((PASS++))
@@ -1178,33 +1042,44 @@ else
 fi
 
 # Test 6: TLS certificate issued for webapp
-echo -n "[6/8] Certificado TLS webapp: "
+echo -n "[6/9] Certificado TLS webapp: "
 if kubectl get certificate webapp-tls -n webapp -o jsonpath='{.status.conditions[0].status}' 2>/dev/null | grep -q True; then
   echo "PASS"; ((PASS++))
 else
   echo "FAIL"; ((FAIL++))
 fi
 
-# Test 7: Ingress responding with HTTPS
-echo -n "[7/8] HTTPS accesible: "
-HTTP_CODE=$(curl -sk --resolve webapp.lab.local:443:${INGRESS_IP} -o /dev/null -w "%{http_code}" https://webapp.lab.local/ 2>/dev/null)
+# Test 7: Ingress responding with HTTPS using the lab CA
+echo -n "[7/9] HTTPS accesible: "
+CA_FILE=$(mktemp)
+kubectl get secret lab-ca-secret -n cert-manager -o jsonpath='{.data.ca\.crt}' | base64 -d > "$CA_FILE"
+HTTP_CODE=$(curl --cacert "$CA_FILE" -o /dev/null -w "%{http_code}" https://webapp.lab.local/ 2>/dev/null)
+rm -f "$CA_FILE"
 if [ "$HTTP_CODE" = "200" ]; then
   echo "PASS (HTTP $HTTP_CODE)"; ((PASS++))
 else
   echo "FAIL (HTTP $HTTP_CODE)"; ((FAIL++))
 fi
 
-# Test 8: Gateway API CRDs installed
-echo -n "[8/8] Gateway API CRDs: "
-GW_CRDS=$(kubectl get crds | grep -c gateway.networking.k8s.io)
-if [ "$GW_CRDS" -ge 4 ]; then
-  echo "PASS ($GW_CRDS CRDs)"; ((PASS++))
+# Test 8: Gateway is accepted by Traefik
+echo -n "[8/9] Gateway aceptado: "
+if kubectl get gateway lab-gateway -n traefik -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' | grep -q True; then
+  echo "PASS"; ((PASS++))
 else
-  echo "FAIL ($GW_CRDS CRDs)"; ((FAIL++))
+  echo "FAIL"; ((FAIL++))
+fi
+
+# Test 9: route is accepted and references resolve
+echo -n "[9/9] HTTPRoute aceptada: "
+ROUTE_STATUS=$(kubectl get httproute webapp-api-route -n webapp -o jsonpath='{.status.parents[0].conditions[*].status}')
+if [ "$(printf '%s' "$ROUTE_STATUS" | tr ' ' '\n' | grep -c True)" -ge 2 ]; then
+  echo "PASS"; ((PASS++))
+else
+  echo "FAIL ($ROUTE_STATUS)"; ((FAIL++))
 fi
 
 echo ""
-echo "=== Resultado: $PASS/8 tests pasados, $FAIL fallidos ==="
+echo "=== Resultado: $PASS/9 tests pasados, $FAIL fallidos ==="
 ```
 
 Guardar y ejecutar:
@@ -1251,7 +1126,7 @@ kubectl apply -f ~/k8s-labs/lab02/manifests/certs/ca-certificate.yaml
 kubectl wait --for=condition=Ready certificate/lab-ca -n cert-manager --timeout=90s
 
 # 5. Forzar re-emisión del wildcard
-kubectl delete certificate wildcard-lab-local -n ingress-nginx
+kubectl delete certificate wildcard-lab-local -n traefik
 kubectl apply -f ~/k8s-labs/lab02/manifests/certs/wildcard-certificate.yaml
 ```
 
@@ -1265,32 +1140,23 @@ $ curl -sk https://webapp.lab.local/
 curl: (7) Failed to connect to webapp.lab.local port 443: Connection refused
 ```
 
-**Causa:** El pod del NGINX Ingress Controller no tiene hostPort configurado correctamente o no está programado en el nodo etiquetado con `ingress-ready=true`.
+**Causa:** Los NodePorts 30080/30443 no se publicaron al crear `lab-calico`, Traefik no está listo o los puertos 80/443 ya estaban ocupados en el host.
 
 **Solución:**
 
 ```bash
-# 1. Verificar en qué nodo está el pod del controlador
-kubectl get pods -n ingress-nginx -o wide
+# 1. Verificar el controlador y el servicio NodePort
+kubectl get pods,svc -n traefik -o wide
 
-# 2. Verificar que el nodo tiene la etiqueta correcta
-kubectl get nodes --show-labels | grep ingress-ready
+# 2. Confirmar los NodePorts esperados
+kubectl get svc traefik -n traefik -o jsonpath='{.spec.ports[*].nodePort}{"\n"}'
 
-# 3. Si el pod no está en el control-plane, verificar la etiqueta
-kubectl label node lab-calico-control-plane ingress-ready=true --overwrite
+# 3. Reinstalar con los valores que fijan esos NodePorts
+helm upgrade traefik traefik/traefik --namespace traefik \
+  --values ~/k8s-labs/lab02/values/traefik-values.yaml --wait --timeout 180s
 
-# 4. Verificar que hostPort está activo en el pod
-kubectl get pod -n ingress-nginx -l app.kubernetes.io/component=controller \
-  -o jsonpath='{.items[0].spec.containers[0].ports}' | python3 -m json.tool
-
-# 5. Si hostPort no aparece, reinstalar con los valores correctos
-helm upgrade ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
-  --values ~/k8s-labs/lab02/values/ingress-nginx-values.yaml \
-  --wait
-
-# 6. Verificar conectividad directa al contenedor Docker
-docker exec lab-calico-control-plane ss -tlnp | grep -E "80|443"
+# 4. Si los mappings faltan, recrear lab-calico siguiendo el Paso 1 del Lab 01.
+# kind no añade extraPortMappings a un clúster ya creado.
 ```
 
 ---
@@ -1318,12 +1184,12 @@ kubectl delete -f ~/k8s-labs/lab02/manifests/certs/ --ignore-not-found
 helm uninstall cert-manager -n cert-manager
 kubectl delete namespace cert-manager
 
-# Desinstalar NGINX Ingress
-helm uninstall ingress-nginx -n ingress-nginx
-kubectl delete namespace ingress-nginx
+# Desinstalar Traefik
+helm uninstall traefik -n traefik
+kubectl delete namespace traefik
 
 # Eliminar Gateway API CRDs
-kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
 
 # Limpiar /etc/hosts
 sudo sed -i '/lab.local/d' /etc/hosts
@@ -1340,23 +1206,24 @@ En este laboratorio se implementó una infraestructura completa de Ingress y ges
 
 | Componente | Estado | Propósito |
 |------------|--------|-----------|
-| NGINX Ingress Controller 1.10.1 | Desplegado en `ingress-nginx` | Proxy inverso con hostPort |
+| Traefik Proxy 3.7.13 | Desplegado en `traefik` | Controlador Ingress y Gateway con NodePort publicado por kind |
 | cert-manager 1.15.1 | Desplegado en `cert-manager` | Gestión automatizada de TLS |
 | ClusterIssuer self-signed | Activo | Bootstrap para CA root |
 | ClusterIssuer lab-ca-issuer | Activo | Emisión de certificados internos |
 | Certificado wildcard *.lab.local | Emitido | Disponible para labs 03-10 |
 | Webapp multi-tier | Running en `webapp` | Aplicación de referencia |
-| Gateway API 1.1.0 CRDs | Instalados | Alternativa moderna a Ingress |
+| Gateway API 1.6.1 CRDs | Instalados y reconciliados | Alternativa moderna a Ingress |
 
 **Conceptos clave aplicados:**
 
 - **Separación de responsabilidades:** La Gateway API divide la gestión entre GatewayClass (infraestructura), Gateway (operadores) y HTTPRoute (desarrolladores), eliminando la dependencia de anotaciones específicas del controlador.
-- **Canary deployments:** Se implementaron tanto con anotaciones de NGINX (`canary-weight`, `canary-by-header`) como con `backendRefs` con `weight` en HTTPRoute.
+- **Canary deployments:** `HTTPRoute` expresa la ponderación con `backendRefs.weight` y la selección determinista con un match de header; no depende de anotaciones específicas de un controlador retirado.
 - **Gestión de certificados declarativa:** cert-manager automatiza la emisión y renovación de certificados mediante CRDs, eliminando la gestión manual de TLS.
 
 ### Recursos Adicionales
 
 - [Documentación oficial Gateway API](https://gateway-api.sigs.k8s.io/)
-- [NGINX Ingress Controller Annotations](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/)
+- [Traefik con Kubernetes Gateway API](https://doc.traefik.io/traefik/reference/install-configuration/providers/kubernetes/kubernetes-gateway/)
+- [Traefik Helm Chart](https://github.com/traefik/traefik-helm-chart)
 - [cert-manager Configuration](https://cert-manager.io/docs/configuration/)
 - [Gateway API vs Ingress: comparativa oficial](https://gateway-api.sigs.k8s.io/concepts/migrating-from-ingress/)

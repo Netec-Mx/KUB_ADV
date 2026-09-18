@@ -16,8 +16,8 @@ Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, sched
 
 ### Capítulo 2
 
-- [implementar Ingress controller y Gateway con certificados gestionados](Capitulo02/README.md#implementar-ingress-controller-y-gateway-con-certificados-gestionados)
-  - Descripción: Implementar un Ingress controller y un Gateway con certificados gestionados para exponer servicios mediante terminación TLS segura.
+- [implementar Traefik Ingress y Gateway con certificados gestionados](Capitulo02/README.md#implementar-ingress-controller-y-gateway-con-certificados-gestionados)
+  - Descripción: Implementar Traefik Proxy como controlador Ingress y Gateway, con certificados gestionados, terminación TLS y rutas HTTPRoute verificables.
   - Duración estimada: 34 min
 
 ### Capítulo 3
@@ -68,8 +68,4 @@ Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, sched
   - Descripción: Diseñar y validar un plan de recuperación ante desastres multi-cluster que contemple alta disponibilidad, backups y recuperación.
   - Duración estimada: 41 min
 
-## Flujo de colaboración
 
-- Trabajar en `changes_course`.
-- Crear Pull Request hacia `main`.
-- Merge por `Squash and merge`.

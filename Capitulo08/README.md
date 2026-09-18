@@ -35,12 +35,12 @@ Este laboratorio implementa una capa completa de seguridad sobre el clúster `la
 
 | Herramienta | Versión | Verificación |
 |-------------|---------|--------------|
-| kubectl | 1.30.2 | `kubectl version --client` |
-| Helm | 3.15.2 | `helm version` |
+| kubectl | 1.35.x | `kubectl version --client` |
+| Helm | 3.20.x | `helm version` |
 | kubeseal | 0.27.1 | `kubeseal --version` |
 | Trivy | 0.53.0 | `trivy --version` |
 | kustomize | 5.4.2 | `kustomize version` |
-| kind | 0.23.0 | `kind version` |
+| kind | 0.33.0 | `kind version` |
 
 ### Verificación del Entorno Previo
 
@@ -49,7 +49,7 @@ Este laboratorio implementa una capa completa de seguridad sobre el clúster `la
 kubectl cluster-info --context kind-lab-calico
 
 # Verificar namespaces de labs anteriores
-kubectl get ns webapp logging monitoring ingress-nginx webapp-operator-system 2>/dev/null
+kubectl get ns webapp logging monitoring traefik webapp-operator-system 2>/dev/null
 ```
 
 ## Entorno del Laboratorio
@@ -190,7 +190,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ops-user-ingress-binding
-  namespace: ingress-nginx
+  namespace: traefik
 subjects:
   - kind: ServiceAccount
     name: ops-user
@@ -340,7 +340,7 @@ kubectl auth can-i delete namespaces \
 
 ## Paso 2: Configurar Network Policies — Default-Deny con Allow-Lists
 
-**Objetivo:** Aplicar aislamiento de red completo en los namespaces `webapp`, `logging`, `monitoring`, `ingress-nginx` y `webapp-operator-system`, permitiendo solo el tráfico necesario.
+**Objetivo:** Aplicar aislamiento de red completo en los namespaces `webapp`, `logging`, `monitoring`, `traefik` y `webapp-operator-system`, permitiendo solo el tráfico necesario.
 
 ### Instrucciones
 
@@ -386,7 +386,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: ingress-nginx
+  namespace: traefik
 spec:
   podSelector: {}
   policyTypes:
@@ -412,7 +412,7 @@ kubectl apply -f ~/k8s-labs/lab08/network-policies/default-deny.yaml
 
 ```bash
 cat > ~/k8s-labs/lab08/network-policies/webapp-allow.yaml << 'EOF'
-# Permitir ingress desde ingress-nginx
+# Permitir ingress desde traefik
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -426,7 +426,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
 ---
 # Permitir ingress desde monitoring (scraping Prometheus)
 apiVersion: networking.k8s.io/v1
@@ -483,7 +483,7 @@ kubectl apply -f ~/k8s-labs/lab08/network-policies/webapp-allow.yaml
 
 ```bash
 cat > ~/k8s-labs/lab08/network-policies/monitoring-allow.yaml << 'EOF'
-# Permitir ingress desde ingress-nginx (Grafana UI)
+# Permitir ingress desde traefik (Grafana UI)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -497,7 +497,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
 ---
 # Permitir egress a todos los namespaces (scraping) y DNS
 apiVersion: networking.k8s.io/v1
@@ -549,16 +549,16 @@ EOF
 kubectl apply -f ~/k8s-labs/lab08/network-policies/monitoring-allow.yaml
 ```
 
-4. Crear allow-lists para `ingress-nginx`:
+4. Crear allow-lists para `traefik`:
 
 ```bash
-cat > ~/k8s-labs/lab08/network-policies/ingress-nginx-allow.yaml << 'EOF'
+cat > ~/k8s-labs/lab08/network-policies/traefik-allow.yaml << 'EOF'
 # Permitir ingress externo (tráfico de clientes)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-external-ingress
-  namespace: ingress-nginx
+  namespace: traefik
 spec:
   podSelector: {}
   policyTypes:
@@ -575,7 +575,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-backends
-  namespace: ingress-nginx
+  namespace: traefik
 spec:
   podSelector: {}
   policyTypes:
@@ -604,7 +604,7 @@ spec:
           port: 53
 EOF
 
-kubectl apply -f ~/k8s-labs/lab08/network-policies/ingress-nginx-allow.yaml
+kubectl apply -f ~/k8s-labs/lab08/network-policies/traefik-allow.yaml
 ```
 
 5. Crear allow-lists para `webapp-operator-system`:
@@ -659,10 +659,10 @@ kubectl apply -f ~/k8s-labs/lab08/network-policies/operator-allow.yaml
 
 ```bash
 # Listar todas las NetworkPolicies creadas
-kubectl get networkpolicies -A | grep -E "webapp|logging|monitoring|ingress-nginx|operator"
+kubectl get networkpolicies -A | grep -E "webapp|logging|monitoring|traefik|operator"
 
 # Verificar que default-deny existe en cada namespace
-for ns in webapp logging monitoring ingress-nginx webapp-operator-system; do
+for ns in webapp logging monitoring traefik webapp-operator-system; do
   echo "--- $ns ---"
   kubectl get networkpolicy default-deny-all -n $ns -o name 2>/dev/null || echo "MISSING"
 done
@@ -699,7 +699,8 @@ kubectl -n kube-system get svc sealed-secrets-controller
 3. Crear el Secret original de Elasticsearch (si no existe):
 
 ```bash
-cat > ~/k8s-labs/lab08/sealed-secrets/es-credentials-secret.yaml << 'EOF'
+export ELASTIC_PASSWORD="${ELASTIC_PASSWORD:-$(openssl rand -hex 24)}"
+cat > ~/k8s-labs/lab08/sealed-secrets/es-credentials-secret.yaml << EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -708,7 +709,7 @@ metadata:
 type: Opaque
 stringData:
   username: elastic
-  password: ElasticK8s2024!
+  password: ${ELASTIC_PASSWORD}
 EOF
 ```
 
@@ -748,7 +749,7 @@ echo
 
 ```
 elastic
-ElasticK8s2024!
+<valor generado en ELASTIC_PASSWORD>
 ```
 
 ### Verificación
@@ -758,7 +759,7 @@ ElasticK8s2024!
 kubectl get sealedsecret elasticsearch-credentials -n logging
 
 # El archivo sellado NO contiene la contraseña en texto claro
-grep -c "ElasticK8s2024" ~/k8s-labs/lab08/sealed-secrets/es-credentials-sealed.yaml
+grep -c "${ELASTIC_PASSWORD}" ~/k8s-labs/lab08/sealed-secrets/es-credentials-sealed.yaml
 # Esperado: 0
 
 # Eliminar el archivo con el secreto en texto claro (buena práctica)
@@ -840,7 +841,7 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: lab-calico
 nodes:
   - role: control-plane
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
     kubeadmConfigPatches:
       - |
         kind: ClusterConfiguration
@@ -867,9 +868,9 @@ nodes:
         containerPath: /etc/kubernetes/audit-policy.yaml
         readOnly: true
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8
 networking:
   disableDefaultCNI: true
   podSubnet: "10.244.0.0/16"
@@ -1027,10 +1028,10 @@ cat ~/k8s-labs/lab08/scanning/trivy-reports/k8s-config-scan.txt
 3. Escanear una imagen específica de infraestructura:
 
 ```bash
-# Escanear la imagen de NGINX Ingress Controller
+# Escanear la imagen del controlador Traefik
 trivy image --severity HIGH,CRITICAL \
-  registry.k8s.io/ingress-nginx/controller:v1.10.1 \
-  2>/dev/null | tee ~/k8s-labs/lab08/scanning/trivy-reports/ingress-nginx.txt
+  traefik:v3.7.13 \
+  2>/dev/null | tee ~/k8s-labs/lab08/scanning/trivy-reports/traefik.txt
 ```
 
 ### Verificación
@@ -1466,7 +1467,7 @@ kubectl auth can-i delete namespaces --as=system:serviceaccount:webapp:ci-servic
 echo ""
 echo "2. Network Policies"
 echo "---"
-NP_COUNT=$(kubectl get networkpolicies -A --no-headers 2>/dev/null | grep -cE "webapp|logging|monitoring|ingress-nginx|operator")
+NP_COUNT=$(kubectl get networkpolicies -A --no-headers 2>/dev/null | grep -cE "webapp|logging|monitoring|traefik|operator")
 echo "  NetworkPolicies creadas: $NP_COUNT (esperado: >= 10)"
 
 echo ""
@@ -1602,7 +1603,7 @@ kubectl delete namespace falco --ignore-not-found
 # helm uninstall sealed-secrets -n kube-system
 
 # Eliminar Network Policies (PRECAUCIÓN: restaura conectividad completa)
-# for ns in webapp logging monitoring ingress-nginx webapp-operator-system; do
+# for ns in webapp logging monitoring traefik webapp-operator-system; do
 #   kubectl delete networkpolicies --all -n $ns
 # done
 

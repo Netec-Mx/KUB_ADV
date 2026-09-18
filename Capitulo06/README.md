@@ -33,7 +33,7 @@ En este laboratorio se diseñará e implementará un Operator completo en Go usa
 
 | Componente | Versión | Verificación |
 |-----------|---------|--------------|
-| Clúster `lab-calico` | kind 0.23.0 / K8s 1.30.2 | `kubectl cluster-info --context kind-lab-calico` |
+| Clúster `lab-calico` | kind 0.33.0 / K8s 1.35.8 | `kubectl cluster-info --context kind-lab-calico` |
 | Registry local | localhost:5000 | `curl -s http://localhost:5000/v2/_catalog` |
 | cert-manager | 1.15.1 | `kubectl get pods -n cert-manager` |
 | Go | 1.22.4 | `go version` |
@@ -49,7 +49,9 @@ En este laboratorio se diseñará e implementará un Operator completo en Go usa
 ```bash
 mkdir -p ~/k8s-labs/lab06
 cd ~/k8s-labs/lab06
-kubectl config use-context kind-lab-calico
+export KUBE_CONTEXT="${KUBE_CONTEXT:-kind-lab-calico}"
+kubectl config use-context "$KUBE_CONTEXT"
+kubectl cluster-info --context "$KUBE_CONTEXT"
 ```
 
 ### Verificar Prerrequisitos
@@ -62,7 +64,8 @@ kubectl get nodes -o wide
 kubectl get pods -n cert-manager --no-headers | grep -c Running
 
 # Verificar registry local
-docker ps --filter name=registry --format '{{.Names}} {{.Status}}'
+  docker ps --filter name=registry --format '{{.Names}} {{.Status}}'
+  curl --fail --silent http://localhost:5000/v2/_catalog
 
 # Verificar herramientas Go
 go version && kubebuilder version && controller-gen --version
@@ -71,9 +74,9 @@ go version && kubebuilder version && controller-gen --version
 **Salida esperada:**
 ```
 NAME                       STATUS   ROLES           AGE   VERSION   INTERNAL-IP   ...
-lab-calico-control-plane   Ready    control-plane   ...   v1.30.2   ...
-lab-calico-worker          Ready    <none>          ...   v1.30.2   ...
-lab-calico-worker2         Ready    <none>          ...   v1.30.2   ...
+  lab-calico-control-plane   Ready    control-plane   ...   v1.35.8   ...
+  lab-calico-worker          Ready    <none>          ...   v1.35.8   ...
+  lab-calico-worker2         Ready    <none>          ...   v1.35.8   ...
 3
 registry Up ...
 go version go1.22.4 linux/amd64
@@ -842,6 +845,10 @@ make docker-build IMG=${IMG}
 ```bash
 make docker-push IMG=${IMG}
 ```
+
+> El registro debe responder en `localhost:5000` antes de publicar. El paso
+> `kind load docker-image` se conserva para que los nodos kind dispongan de la
+> imagen aunque el contenedor del registro no esté conectado a su red Docker.
 
 6. Cargar la imagen en los nodos del clúster kind:
 
