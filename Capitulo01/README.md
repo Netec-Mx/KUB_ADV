@@ -183,6 +183,7 @@ kubectl apply -f ~/k8s-labs/lab01/calico/calico-installation.yaml
 4. Espera a que todos los componentes de Calico estén listos:
 
 ```bash
+until kubectl get pods -n calico-system -o name 2>/dev/null | grep -q .; do sleep 5; done
 kubectl wait --for=condition=Ready pods --all -n calico-system --timeout=120s
 ```
 
@@ -289,7 +290,8 @@ kubectl apply -f ~/k8s-labs/lab01/nettest/nettest-calico.yaml
 3. Espera a que los pods estén listos:
 
 ```bash
-kubectl wait --for=condition=Ready pods --all -n network-test --timeout=90s
+kubectl wait --for=condition=Available deployment/nettest-server -n network-test --timeout=90s
+kubectl wait --for=condition=Available deployment/nettest-client -n network-test --timeout=90s
 ```
 
 4. Verifica la conectividad entre pods:
@@ -474,7 +476,8 @@ kubectl apply -f ~/k8s-labs/lab01/nettest/nettest-calico.yaml --context kind-lab
 2. Espera a que los pods estén listos:
 
 ```bash
-kubectl wait --for=condition=Ready pods --all -n network-test --timeout=90s --context kind-lab-cilium
+kubectl wait --for=condition=Available deployment/nettest-server -n network-test --timeout=90s --context kind-lab-cilium
+kubectl wait --for=condition=Available deployment/nettest-client -n network-test --timeout=90s --context kind-lab-cilium
 ```
 
 3. Verifica la conectividad:

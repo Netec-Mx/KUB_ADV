@@ -34,12 +34,12 @@ En este laboratorio se diseñará e implementará un Operator completo en Go usa
 | Componente | Versión | Verificación |
 |-----------|---------|--------------|
 | Clúster `lab-calico` | kind 0.33.0 / K8s 1.35.8 | `kubectl cluster-info --context kind-lab-calico` |
-| Registry local | localhost:5000 | `curl -s http://localhost:5000/v2/_catalog` |
+| Registry local | Opcional; se puede usar `kind load docker-image` | `docker ps --filter name=registry` |
 | cert-manager | 1.15.1 | `kubectl get pods -n cert-manager` |
-| Go | 1.22.4 | `go version` |
-| kubebuilder | 3.15.1 | `kubebuilder version` |
+| Go | 1.23.x o posterior compatible con Kubebuilder 4.6 | `go version` |
+| kubebuilder | 4.6.0 | `kubebuilder version` |
 | Operator SDK | 1.35.0 | `operator-sdk version` |
-| controller-gen | 0.15.0 | `controller-gen --version` |
+| controller-gen | 0.16.5 o el binario descargado por Makefile | `controller-gen --version` |
 | Docker | 26.1.4 | `docker version --format '{{.Server.Version}}'` |
 
 ## Entorno del Laboratorio
@@ -63,9 +63,9 @@ kubectl get nodes -o wide
 # Verificar cert-manager (necesario para webhooks)
 kubectl get pods -n cert-manager --no-headers | grep -c Running
 
-# Verificar registry local
-  docker ps --filter name=registry --format '{{.Names}} {{.Status}}'
-  curl --fail --silent http://localhost:5000/v2/_catalog
+# Verificar registry local (opcional)
+docker ps --filter name=registry --format '{{.Names}} {{.Status}}'
+# Si no existe registry, el laboratorio usa kind load docker-image
 
 # Verificar herramientas Go
 go version && kubebuilder version && controller-gen --version
@@ -84,6 +84,10 @@ go version go1.22.4 linux/amd64
 ```
 
 ---
+
+### Compatibilidad verificada en Ubuntu 24.04
+
+Kubebuilder 4.6 requiere Go 1.23 o superior. Si el sistema solo tiene Go 1.22, instala Go 1.23.x antes de ejecutar `kubebuilder init` o utiliza `--skip-go-version-check` ?nicamente para scaffolding temporal. El registry local no es obligatorio: para kind se puede construir la imagen y cargarla con `kind load docker-image lab.local/webapp-operator:dev --name lab-calico`.
 
 ## Paso 1: Scaffolding del Proyecto con Kubebuilder
 
@@ -386,6 +390,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/lab/webapp-operator/api/v1alpha1"
 )
@@ -506,6 +511,10 @@ func (r *WebAppDeploymentReconciler) reconcileDeployment(ctx context.Context, we
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					Tolerations: []corev1.Toleration{
+						{Key: "workload-type", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+						{Key: "node-role.kubernetes.io/control-plane", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:  component,
@@ -636,7 +645,7 @@ func (r *WebAppDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 2,
-			RateLimiter: workqueue.NewItemExponentialFailureRateLimiter(
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](
 				time.Second,
 				30*time.Second,
 			),
@@ -825,13 +834,16 @@ go mod tidy
 
 ```bash
 go build ./...
+
+# La suite envtest requiere descargar los binarios etcd/kube-apiserver; sin ellos, valida la compilaci?n con:
+go test ./api/... ./cmd
 ```
 
 3. Configurar el Makefile para usar el registry local:
 
 ```bash
 # Establecer la imagen del Operator
-export IMG=localhost:5000/webapp-operator:v0.1.0
+export IMG=lab.local/webapp-operator:v0.1.0
 ```
 
 4. Construir la imagen Docker:
@@ -843,7 +855,8 @@ make docker-build IMG=${IMG}
 5. Publicar la imagen en el registry local:
 
 ```bash
-make docker-push IMG=${IMG}
+# Si existe un registry local, se puede publicar; para kind no es necesario.
+# make docker-push IMG=${IMG}
 ```
 
 > El registro debe responder en `localhost:5000` antes de publicar. El paso
@@ -866,8 +879,9 @@ Image: "localhost:5000/webapp-operator:v0.1.0" with ID "sha256:..." not yet pres
 **Verificación:**
 ```bash
 # Verificar que la imagen está en el registry
-curl -s http://localhost:5000/v2/webapp-operator/tags/list
-# Salida esperada: {"name":"webapp-operator","tags":["v0.1.0"]}
+# En este entorno no hay registry local; validar la imagen cargada en los nodos kind
+kind get nodes --name lab-calico
+docker images | grep webapp-operator
 
 # Verificar la imagen en Docker local
 docker images | grep webapp-operator
@@ -891,7 +905,22 @@ kubectl create namespace webapp-operator-system --dry-run=client -o yaml | kubec
 
 ```bash
 cd ~/k8s-labs/lab06/webapp-operator
-make deploy IMG=localhost:5000/webapp-operator:v0.1.0
+make deploy IMG=lab.local/webapp-operator:v0.1.0
+```
+
+Antes de desplegar, agrega toleraciones al Deployment del Operator porque el cl?ster de pr?ctica tiene taints en control-plane y workers:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+p=Path("config/manager/manager.yaml")
+s=p.read_text()
+marker="      containers:"
+toler="      tolerations:\n      - key: workload-type\n        operator: Exists\n        effect: NoSchedule\n      - key: node-role.kubernetes.io/control-plane\n        operator: Exists\n        effect: NoSchedule\n"
+if "      tolerations:" not in s:
+    s=s.replace(marker,toler+marker)
+p.write_text(s)
+PY
 ```
 
 3. Verificar que el CRD fue registrado:
@@ -1260,7 +1289,7 @@ cat config/default/kustomization.yaml | grep -A2 certmanager
 
 # Si los patches no están habilitados, corregir y redesplegar
 sed -i 's|#- ../certmanager|- ../certmanager|' config/default/kustomization.yaml
-make deploy IMG=localhost:5000/webapp-operator:v0.1.0
+make deploy IMG=lab.local/webapp-operator:v0.1.0
 
 # Alternativa: si el webhook no es crítico para el lab, deshabilitar temporalmente
 # la conversión y usar solo v1alpha1 como storage version
@@ -1291,7 +1320,7 @@ kubectl describe clusterrole webapp-operator-manager-role | grep -A3 "deployment
 # Si falta el permiso, regenerar manifests y redesplegar
 cd ~/k8s-labs/lab06/webapp-operator
 make manifests
-make deploy IMG=localhost:5000/webapp-operator:v0.1.0
+make deploy IMG=lab.local/webapp-operator:v0.1.0
 
 # Verificar que el ServiceAccount tiene el binding correcto
 kubectl get clusterrolebinding | grep webapp-operator

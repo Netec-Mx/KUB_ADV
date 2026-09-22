@@ -37,12 +37,74 @@ En esta práctica diseñarás un Helm chart avanzado para la aplicación `webapp
 | Helm | 3.20.x | Instalado con plugins |
 | helm-unittest | 0.5.1 | Plugin instalado |
 | chart-testing (ct) | 3.11.0 | Binario en PATH |
-| Tekton Pipelines | 0.61.0 | Aplicado al clúster |
-| Tekton Triggers | 0.26.0 | Aplicado al clúster |
-| tkn CLI | 0.37.0 | Instalado |
-| Gitea | 1.22.0 | Corriendo en ns `gitea` |
+| Tekton Pipelines | 1.15.0 LTS | Instalado desde GHCR |
+| Tekton Triggers | 0.37.0 LTS | Instalado desde GHCR |
+| tkn CLI | Opcional | La práctica también incluye verificación con `kubectl` |
+| Gitea | 1.27.0 | Corriendo en ns `gitea` |
 | ChartMuseum | 0.16.2 | Corriendo en ns `helm-registry` |
 | yamllint | 1.35.1 | Instalado via pip3 |
+
+## Compatibilidad con el entorno remoto
+
+El clúster `lab-calico` no incluye Gitea, ChartMuseum, Tekton Pipelines ni Tekton Triggers de forma predeterminada. Instala y valida estos componentes antes del Paso 6. El pipeline y el webhook forman parte del resultado requerido del laboratorio.
+
+En esta VM se instalaron ChartMuseum 0.16.2 mediante chart `chartmuseum/chartmuseum` 3.10.3 y Gitea 1.27.0 con chart `gitea-charts/gitea` 12.7.0. Ambos se configuraron con SQLite, persistencia local y toleraciones para los taints del clúster:
+
+```bash
+helm repo add chartmuseum https://chartmuseum.github.io/charts
+helm repo add gitea-charts https://dl.gitea.com/charts/
+helm upgrade --install chartmuseum chartmuseum/chartmuseum --version 3.10.3 \
+  --namespace helm-registry --create-namespace --set persistence.enabled=true --set persistence.size=2Gi
+helm upgrade --install gitea gitea-charts/gitea --version 12.7.0 \
+  --namespace gitea --create-namespace --set postgresql-ha.enabled=false \
+  --set valkey-cluster.enabled=false --set valkey.enabled=false \
+  --set gitea.config.database.DB_TYPE=sqlite3 \
+  --set strategy.type=Recreate \
+  --set-string gitea.config.webhook.ALLOWED_HOST_LIST=el-webapp-chart-listener.webapp.svc.cluster.local
+```
+
+Cuando Gitea utiliza SQLite sobre un único PVC, la estrategia debe ser
+`Recreate`. `RollingUpdate` inicia temporalmente dos Pods y el segundo falla al
+intentar bloquear la base LevelDB de las colas. Después de reiniciar la VM,
+valida y recupera Gitea con:
+
+```bash
+kubectl get pods -n gitea
+kubectl patch deployment/gitea -n gitea --type=merge \
+  -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+kubectl rollout restart deployment/gitea -n gitea
+kubectl rollout status deployment/gitea -n gitea --timeout=180s
+kubectl exec -n gitea deployment/gitea -- \
+  wget -qO- http://127.0.0.1:3000/api/v1/version
+```
+
+Las versiones antiguas de Tekton basadas en `gcr.io` producen `403 Forbidden` en la red institucional. Esta práctica usa Tekton Pipelines 1.15.0 LTS y Triggers 0.37.0 LTS, cuyas imágenes oficiales están en `ghcr.io/tektoncd`.
+
+Instala ambos componentes desde la raíz del material y valida todos sus Deployments:
+
+```bash
+cd KUB_ADV/Capitulo07
+bash tekton/install-tekton.sh
+kubectl get deployments,pods -n tekton-pipelines
+kubectl get deployments,pods -n tekton-pipelines-resolvers
+```
+
+El script también agrega `tolerations` porque los tres nodos del laboratorio tienen taints. Todos los Deployments deben quedar `Available` y todos los Pods, `Running`.
+
+Instala las herramientas auxiliares así:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+# helm-unittest
+helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.5.1
+# chart-testing
+curl -fsSL https://github.com/helm/chart-testing/releases/download/v3.11.0/chart-testing_3.11.0_linux_amd64.tar.gz -o /tmp/ct.tgz
+mkdir -p /tmp/ct && tar -xzf /tmp/ct.tgz -C /tmp/ct
+install -m 0755 /tmp/ct/ct "$HOME/.local/bin/ct"
+# yamllint en Ubuntu con PEP 668
+python3 -m pip install --user --break-system-packages yamllint==1.35.1
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ## Entorno del Laboratorio
 
@@ -61,7 +123,14 @@ kubectl config use-context "$KUBE_CONTEXT"
 kubectl cluster-info --context "$KUBE_CONTEXT"
 kubectl get pods -n helm-registry
 kubectl get pods -n gitea
-kubectl get pods -n tekton-pipelines
+kubectl wait --for=condition=Available deployment --all -n tekton-pipelines --timeout=300s
+kubectl wait --for=condition=Available deployment --all -n tekton-pipelines-resolvers --timeout=300s
+
+# Validar APIs internas
+kubectl exec -n helm-registry deployment/chartmuseum -- \
+  wget -qO- http://127.0.0.1:8080/health
+kubectl exec -n gitea deployment/gitea -- \
+  wget -qO- http://127.0.0.1:3000/api/v1/version
 ```
 
 ### Configurar acceso a ChartMuseum
@@ -210,10 +279,14 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/config: {{ .Values.environment | default "dev" | sha256sum }}
       labels:
         {{- include "webapp.selectorLabels" . | nindent 8 }}
     spec:
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: {{ include "webapp.image" . }}
@@ -378,8 +451,8 @@ environment: dev
 replicaCount: 1
 
 image:
-  repository: localhost:5000/webapp
-  tag: "1.0.0"
+  repository: nginx
+  tag: "1.27-alpine"
   pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -388,7 +461,7 @@ fullnameOverride: ""
 service:
   type: ClusterIP
   port: 80
-  targetPort: 8080
+  targetPort: 80
 
 ingress:
   enabled: true
@@ -417,23 +490,38 @@ resources:
 
 probes:
   liveness:
-    path: /healthz
+    path: /
     initialDelaySeconds: 10
     periodSeconds: 10
   readiness:
-    path: /ready
+    path: /
     initialDelaySeconds: 5
     periodSeconds: 5
 
 extraEnv: []
 
+# Todos los nodos del clúster del curso tienen taints.
+tolerations:
+  - operator: Exists
+
+global:
+  security:
+    # Bitnami archivó los tags históricos del subchart 15.5.7 aquí.
+    allowInsecureImages: true
+
 postgresql:
   enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: 16.3.0-debian-12-r14
   auth:
     database: webapp
     username: webapp
     password: webapp-pass
   primary:
+    tolerations:
+      - operator: Exists
     persistence:
       size: 1Gi
 
@@ -605,7 +693,7 @@ mkdir -p ~/k8s-labs/lab07/charts/webapp/tests
 cat > ~/k8s-labs/lab07/charts/webapp/tests/deployment_test.yaml <<'EOF'
 suite: Deployment tests
 templates:
-  - deployment.yaml
+  - templates/deployment.yaml
 tests:
   - it: debe renderizar el nombre correcto
     set:
@@ -662,7 +750,7 @@ EOF
 cat > ~/k8s-labs/lab07/charts/webapp/tests/service_test.yaml <<'EOF'
 suite: Service tests
 templates:
-  - service.yaml
+  - templates/service.yaml
 tests:
   - it: debe crear un Service ClusterIP por defecto
     asserts:
@@ -686,7 +774,7 @@ EOF
 cat > ~/k8s-labs/lab07/charts/webapp/tests/ingress_test.yaml <<'EOF'
 suite: Ingress tests
 templates:
-  - ingress.yaml
+  - templates/ingress.yaml
 tests:
   - it: debe crear Ingress cuando está habilitado
     set:
@@ -730,7 +818,13 @@ validate-maintainers: false
 EOF
 
 cd ~/k8s-labs/lab07
-ct lint --config ct/ct.yaml --charts charts/webapp
+# ct 3.11 requiere sus esquemas cuando no est?n instalados globalmente
+cp /tmp/ct/etc/chart_schema.yaml ct/chart_schema.yaml
+cp /tmp/ct/etc/lintconf.yaml ct/lintconf.yaml
+helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
+ct lint --validate-chart-schema=false --chart-yaml-schema ct/chart_schema.yaml \
+  --lint-conf ct/lintconf.yaml --helm-dependency-extra-args="--skip-refresh" \
+  --config ct/ct.yaml --charts charts/webapp
 ```
 
 7. Validar YAML con yamllint:
@@ -768,6 +862,8 @@ Debe mostrar al menos 8 test cases.
 ## Paso 3: Publicar el Chart en ChartMuseum
 
 **Objetivo:** Empaquetar y publicar versiones del chart en ChartMuseum como repositorio privado.
+
+> En el servidor de validaci?n no existe el namespace `helm-registry`. Primero verifica `kubectl get ns helm-registry`. Si no existe, valida esta etapa con `helm package .` y conserva el `.tgz`; no ejecutes `helm cm-push` hasta disponer de ChartMuseum.
 
 ### Instrucciones
 
@@ -858,6 +954,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
       containers:
         - name: db-backup
           image: busybox:1.36
@@ -891,6 +989,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
       containers:
         - name: smoke-test
           image: curlimages/curl:8.4.0
@@ -933,6 +1033,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
       containers:
         - name: notify-rollback
           image: busybox:1.36
@@ -991,7 +1093,7 @@ Debe mostrar 3 (versiones 1.0.0, 1.1.0, 1.2.0).
 ```bash
 curl -X POST "$GITEA_URL/api/v1/user/repos" \
   -H "Content-Type: application/json" \
-  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
+  -u "admin:${GITEA_ADMIN_PASSWORD}" \
   -d '{
     "name": "webapp-chart",
     "description": "Helm chart para webapp",
@@ -1004,7 +1106,7 @@ curl -X POST "$GITEA_URL/api/v1/user/repos" \
 
 ```bash
 cd ~/k8s-labs/lab07
-git clone http://gitea-admin:${GITEA_ADMIN_PASSWORD}@localhost:3000/gitea-admin/webapp-chart.git repo-webapp-chart
+git clone http://admin:${GITEA_ADMIN_PASSWORD}@localhost:3000/admin/webapp-chart.git repo-webapp-chart
 cp -r charts/webapp/* repo-webapp-chart/
 cd repo-webapp-chart
 git add -A
@@ -1027,515 +1129,152 @@ git add ct.yaml && git commit -m "chore: add ct config" && git push origin main
 ### Salida Esperada
 
 ```
-To http://localhost:3000/gitea-admin/webapp-chart.git
+To http://localhost:3000/admin/webapp-chart.git
    abc1234..def5678  main -> main
 ```
 
 ### Verificación
 
 ```bash
-curl -s "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart" \
-  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" | python3 -m json.tool | grep '"name"'
+curl -s "$GITEA_URL/api/v1/repos/admin/webapp-chart" \
+  -u "admin:${GITEA_ADMIN_PASSWORD}" | python3 -m json.tool | grep '"name"'
 ```
 
 ---
 
 ## Paso 6: Construir el Pipeline CI con Tekton
 
-**Objetivo:** Crear Tasks y Pipeline de Tekton que automaticen lint, test, empaquetado y publicación del chart.
+**Objetivo:** Ejecutar lint, pruebas, empaquetado, publicación y despliegue desde un repositorio privado de Gitea.
 
 ### Instrucciones
 
-1. Crear el namespace y ServiceAccount para el pipeline:
+1. Crear el Secret de clonación sin escribir la contraseña en el manifiesto:
 
 ```bash
-cd ~/k8s-labs/lab07/pipeline
-
-cat > sa-pipeline.yaml <<'EOF'
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: pipeline-sa
-  namespace: webapp
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: pipeline-sa-admin
-subjects:
-  - kind: ServiceAccount
-    name: pipeline-sa
-    namespace: webapp
-roleRef:
-  kind: ClusterRole
-  name: cluster-admin
-  apiGroup: rbac.authorization.k8s.io
-EOF
-kubectl apply -f sa-pipeline.yaml
+kubectl create secret generic gitea-credentials -n webapp \
+  --from-literal=username=admin \
+  --from-literal=password="$GITEA_ADMIN_PASSWORD" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-2. Crear PersistentVolumeClaim para workspace compartido:
+2. Aplicar el ServiceAccount, PVC, cinco Tasks y Pipeline incluidos con el laboratorio:
 
 ```bash
-cat > pvc-workspace.yaml <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: chart-workspace
-  namespace: webapp
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-EOF
-kubectl apply -f pvc-workspace.yaml
+cd KUB_ADV/Capitulo07
+kubectl apply -f tekton/lab07-pipeline.yaml
+kubectl get tasks,pipeline -n webapp
 ```
 
-3. Crear Task `git-clone`:
+El manifiesto usa `charts/webapp` como ruta del chart, consume el Secret mediante `.netrc`, acepta ramas o SHA de Git y publica por la API de ChartMuseum. Una respuesta `409` se considera correcta cuando la versión ya existe, de modo que el ejercicio se puede repetir.
+
+3. Ejecutar el pipeline. El `podTemplate` incluido tolera los taints de todos los nodos:
 
 ```bash
-cat > task-git-clone.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: git-clone-chart
-  namespace: webapp
-spec:
-  params:
-    - name: repo-url
-      type: string
-    - name: revision
-      type: string
-      default: main
-  workspaces:
-    - name: output
-  steps:
-    - name: clone
-      image: alpine/git:2.43.0
-      script: |
-        #!/bin/sh
-        set -ex
-        WORKDIR="$(workspaces.output.path)"
-        case "$WORKDIR" in
-          /workspace/*) ;;
-          *) echo "Workspace inesperado: $WORKDIR" >&2; exit 1 ;;
-        esac
-        cd "$WORKDIR"
-        find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-        git clone $(params.repo-url) .
-        git checkout $(params.revision)
-        echo "Clonado $(params.repo-url) en revision $(params.revision)"
-        ls -la
-EOF
-kubectl apply -f task-git-clone.yaml
+kubectl create -f tekton/pipelinerun.yaml
+PRUN=$(kubectl get pipelinerun -n webapp \
+  --sort-by=.metadata.creationTimestamp -o name | tail -1)
+kubectl wait --for=condition=Succeeded "$PRUN" -n webapp --timeout=600s
+kubectl get taskrun -n webapp -l "tekton.dev/pipelineRun=${PRUN#*/}"
 ```
 
-4. Crear Task `helm-lint`:
+4. Consultar logs sin depender de `tkn`:
 
 ```bash
-cat > task-helm-lint.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: helm-lint
-  namespace: webapp
-spec:
-  workspaces:
-    - name: source
-  steps:
-    - name: lint
-      image: alpine/helm:3.20.0
-      script: |
-        #!/bin/sh
-        set -ex
-        cd $(workspaces.source.path)
-        helm dependency update .
-        helm lint . --strict
-        echo "Helm lint PASSED"
-EOF
-kubectl apply -f task-helm-lint.yaml
-```
-
-5. Crear Task `helm-unittest`:
-
-```bash
-cat > task-helm-unittest.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: helm-unittest
-  namespace: webapp
-spec:
-  workspaces:
-    - name: source
-  steps:
-    - name: unittest
-      image: helmunittest/helm-unittest:3.15.2-0.5.1
-      script: |
-        #!/bin/sh
-        set -ex
-        cd $(workspaces.source.path)
-        helm dependency update .
-        helm unittest .
-        echo "Helm unittest PASSED"
-EOF
-kubectl apply -f task-helm-unittest.yaml
-```
-
-6. Crear Task `helm-package-push`:
-
-```bash
-cat > task-helm-package-push.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: helm-package-push
-  namespace: webapp
-spec:
-  params:
-    - name: chartmuseum-url
-      type: string
-      default: "http://chartmuseum.helm-registry.svc.cluster.local:8080"
-  workspaces:
-    - name: source
-  steps:
-    - name: package-and-push
-      image: alpine/helm:3.20.0
-      script: |
-        #!/bin/sh
-        set -ex
-        cd $(workspaces.source.path)
-        
-        # Instalar plugin cm-push
-        helm plugin install https://github.com/chartmuseum/helm-push || true
-        
-        # Agregar repo ChartMuseum
-        helm repo add cm $(params.chartmuseum-url) || true
-        helm repo update
-        
-        # Empaquetar
-        helm dependency update .
-        helm package .
-        
-        # Obtener nombre del archivo generado
-        CHART_FILE=$(ls *.tgz | head -1)
-        echo "Publicando $CHART_FILE"
-        
-        # Push al repositorio
-        helm cm-push $CHART_FILE cm
-        echo "Chart publicado exitosamente en ChartMuseum"
-EOF
-kubectl apply -f task-helm-package-push.yaml
-```
-
-7. Crear Task `helm-upgrade-release`:
-
-```bash
-cat > task-helm-upgrade.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: helm-upgrade-release
-  namespace: webapp
-spec:
-  params:
-    - name: release-name
-      type: string
-      default: webapp
-    - name: namespace
-      type: string
-      default: webapp
-    - name: values-file
-      type: string
-      default: values.yaml
-  workspaces:
-    - name: source
-  steps:
-    - name: upgrade
-      image: alpine/helm:3.20.0
-      script: |
-        #!/bin/sh
-        set -ex
-        cd $(workspaces.source.path)
-        helm dependency update .
-        helm upgrade --install $(params.release-name) . \
-          -f $(params.values-file) \
-          --namespace $(params.namespace) \
-          --wait \
-          --timeout 120s \
-          --atomic
-        echo "Release $(params.release-name) actualizado exitosamente"
-EOF
-kubectl apply -f task-helm-upgrade.yaml
-```
-
-8. Crear el Pipeline completo:
-
-```bash
-cat > pipeline-webapp-chart.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: Pipeline
-metadata:
-  name: webapp-chart-ci
-  namespace: webapp
-spec:
-  params:
-    - name: repo-url
-      type: string
-      default: "http://gitea-http.gitea.svc.cluster.local:3000/gitea-admin/webapp-chart.git"
-    - name: revision
-      type: string
-      default: main
-    - name: chartmuseum-url
-      type: string
-      default: "http://chartmuseum.helm-registry.svc.cluster.local:8080"
-  workspaces:
-    - name: shared-workspace
-  tasks:
-    - name: fetch-source
-      taskRef:
-        name: git-clone-chart
-      params:
-        - name: repo-url
-          value: $(params.repo-url)
-        - name: revision
-          value: $(params.revision)
-      workspaces:
-        - name: output
-          workspace: shared-workspace
-
-    - name: lint
-      taskRef:
-        name: helm-lint
-      runAfter:
-        - fetch-source
-      workspaces:
-        - name: source
-          workspace: shared-workspace
-
-    - name: unit-test
-      taskRef:
-        name: helm-unittest
-      runAfter:
-        - lint
-      workspaces:
-        - name: source
-          workspace: shared-workspace
-
-    - name: package-publish
-      taskRef:
-        name: helm-package-push
-      params:
-        - name: chartmuseum-url
-          value: $(params.chartmuseum-url)
-      runAfter:
-        - unit-test
-      workspaces:
-        - name: source
-          workspace: shared-workspace
-
-    - name: deploy-dev
-      taskRef:
-        name: helm-upgrade-release
-      params:
-        - name: release-name
-          value: webapp
-        - name: namespace
-          value: webapp
-        - name: values-file
-          value: values.yaml
-      runAfter:
-        - package-publish
-      workspaces:
-        - name: source
-          workspace: shared-workspace
-EOF
-kubectl apply -f pipeline-webapp-chart.yaml
-```
-
-9. Ejecutar el pipeline manualmente para validar:
-
-```bash
-cat > pipelinerun-manual.yaml <<'EOF'
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: webapp-chart-ci-run-
-  namespace: webapp
-spec:
-  pipelineRef:
-    name: webapp-chart-ci
-  params:
-    - name: repo-url
-      value: "http://gitea-http.gitea.svc.cluster.local:3000/gitea-admin/webapp-chart.git"
-    - name: revision
-      value: main
-  workspaces:
-    - name: shared-workspace
-      persistentVolumeClaim:
-        claimName: chart-workspace
-  taskRunTemplate:
-    serviceAccountName: pipeline-sa
-EOF
-kubectl create -f pipelinerun-manual.yaml
-```
-
-10. Monitorear la ejecución:
-
-```bash
-# Obtener nombre del PipelineRun
-PRUN=$(kubectl get pipelinerun -n webapp --sort-by=.metadata.creationTimestamp -o name | tail -1)
-tkn pipelinerun logs ${PRUN#*/} -n webapp -f
-```
-
-### Salida Esperada
-
-```
-[fetch-source : clone] Clonado http://gitea-http... en revision main
-[lint : lint] ==> Linting .
-[lint : lint] 1 chart(s) linted, 0 chart(s) failed
-[lint : lint] Helm lint PASSED
-[unit-test : unittest] PASS  ...
-[unit-test : unittest] Helm unittest PASSED
-[package-publish : package-and-push] Chart publicado exitosamente en ChartMuseum
-[deploy-dev : upgrade] Release webapp actualizado exitosamente
+for pod in $(kubectl get pods -n webapp \
+  -l "tekton.dev/pipelineRun=${PRUN#*/}" -o name); do
+  echo "=== $pod ==="
+  kubectl logs -n webapp "$pod" --all-containers --tail=100
+done
 ```
 
 ### Verificación
 
 ```bash
-tkn pipelinerun list -n webapp
-kubectl get pipelinerun -n webapp -o jsonpath='{.items[-1].status.conditions[0].status}'
+kubectl get "$PRUN" -n webapp \
+  -o jsonpath='{.status.conditions[0].status}{" "}{.status.conditions[0].reason}{"\n"}'
+kubectl get pods -n webapp | grep -E 'webapp-webapp|webapp-postgresql'
+helm status webapp -n webapp
 ```
 
-Debe mostrar `True` (éxito).
+El PipelineRun debe mostrar `True Succeeded`; `webapp-webapp` y `webapp-postgresql-0` deben quedar `Running`.
 
 ---
 
 ## Paso 7: Configurar Tekton Triggers para Webhooks de Gitea
 
-**Objetivo:** Automatizar la ejecución del pipeline cuando se detectan cambios en el repositorio Gitea mediante webhooks.
+**Objetivo:** Crear un PipelineRun automáticamente al recibir un push de Gitea.
 
 ### Instrucciones
 
-1. Crear el EventListener y TriggerTemplate:
+1. Autorizar únicamente el nombre DNS interno del EventListener en Gitea. Conserva `Recreate`: SQLite y un PVC no admiten dos Pods durante un `RollingUpdate`.
 
 ```bash
-cat > ~/k8s-labs/lab07/pipeline/triggers.yaml <<'EOF'
-apiVersion: triggers.tekton.dev/v1beta1
-kind: TriggerTemplate
-metadata:
-  name: webapp-chart-trigger-template
-  namespace: webapp
-spec:
-  params:
-    - name: git-revision
-      default: main
-    - name: git-repo-url
-  resourcetemplates:
-    - apiVersion: tekton.dev/v1
-      kind: PipelineRun
-      metadata:
-        generateName: webapp-chart-ci-triggered-
-      spec:
-        pipelineRef:
-          name: webapp-chart-ci
-        params:
-          - name: repo-url
-            value: $(tt.params.git-repo-url)
-          - name: revision
-            value: $(tt.params.git-revision)
-        workspaces:
-          - name: shared-workspace
-            persistentVolumeClaim:
-              claimName: chart-workspace
-        taskRunTemplate:
-          serviceAccountName: pipeline-sa
----
-apiVersion: triggers.tekton.dev/v1beta1
-kind: TriggerBinding
-metadata:
-  name: webapp-chart-trigger-binding
-  namespace: webapp
-spec:
-  params:
-    - name: git-revision
-      value: $(body.after)
-    - name: git-repo-url
-      value: $(body.repository.clone_url)
----
-apiVersion: triggers.tekton.dev/v1beta1
-kind: EventListener
-metadata:
-  name: webapp-chart-listener
-  namespace: webapp
-spec:
-  serviceAccountName: pipeline-sa
-  triggers:
-    - name: gitea-push
-      bindings:
-        - ref: webapp-chart-trigger-binding
-      template:
-        ref: webapp-chart-trigger-template
-EOF
-kubectl apply -f ~/k8s-labs/lab07/pipeline/triggers.yaml
+helm upgrade gitea gitea-charts/gitea -n gitea --reuse-values \
+  --set strategy.type=Recreate \
+  --set-string gitea.config.webhook.ALLOWED_HOST_LIST=el-webapp-chart-listener.webapp.svc.cluster.local \
+  --wait --timeout 300s
+kubectl patch deployment/gitea -n gitea --type=merge \
+  -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+kubectl rollout status deployment/gitea -n gitea --timeout=180s
 ```
 
-2. Verificar que el EventListener está corriendo:
+2. Aplicar Triggers. El EventListener y los PipelineRuns generados incluyen las toleraciones del clúster:
 
 ```bash
-kubectl get eventlistener -n webapp
-kubectl get svc -n webapp | grep el-webapp-chart-listener
+cd KUB_ADV/Capitulo07
+kubectl apply -f tekton/triggers.yaml
+kubectl wait --for=condition=Available \
+  deployment/el-webapp-chart-listener -n webapp --timeout=180s
+kubectl get eventlistener,triggerbinding,triggertemplate -n webapp
 ```
 
-3. Configurar webhook en Gitea (apuntando al EventListener):
+3. Registrar el webhook desde el port-forward de Gitea:
 
 ```bash
-EL_SVC=$(kubectl get svc -n webapp -l eventlistener=webapp-chart-listener -o jsonpath='{.items[0].metadata.name}')
-
-curl -X POST "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks" \
-  -H "Content-Type: application/json" \
-  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
-  -d "{
-    \"type\": \"gitea\",
-    \"active\": true,
-    \"config\": {
-      \"url\": \"http://${EL_SVC}.webapp.svc.cluster.local:8080\",
-      \"content_type\": \"json\"
+curl -fsS -X POST "$GITEA_URL/api/v1/repos/admin/webapp-chart/hooks" \
+  -u "admin:${GITEA_ADMIN_PASSWORD}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type":"gitea",
+    "active":true,
+    "config":{
+      "url":"http://el-webapp-chart-listener.webapp.svc.cluster.local:8080",
+      "content_type":"json"
     },
-    \"events\": [\"push\"]
-  }"
+    "events":["push"]
+  }'
 ```
 
-4. Simular un push para disparar el pipeline:
+4. Obtener el identificador y probar la entrega integrada:
 
 ```bash
-cd ~/k8s-labs/lab07/repo-webapp-chart
-echo "# Trigger CI" >> README.md
-git add -A && git commit -m "ci: trigger pipeline" && git push origin main
-```
-
-5. Verificar que se creó un nuevo PipelineRun:
-
-```bash
+HOOK_ID=$(curl -fsS -u "admin:${GITEA_ADMIN_PASSWORD}" \
+  "$GITEA_URL/api/v1/repos/admin/webapp-chart/hooks" | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["id"])')
+curl -fsS -X POST -u "admin:${GITEA_ADMIN_PASSWORD}" \
+  "$GITEA_URL/api/v1/repos/admin/webapp-chart/hooks/${HOOK_ID}/tests"
 sleep 5
-tkn pipelinerun list -n webapp --limit 3
+kubectl get pipelinerun -n webapp --sort-by=.metadata.creationTimestamp | tail -2
 ```
 
-### Salida Esperada
+Gitea debe responder HTTP `204` y debe aparecer un `webapp-chart-ci-triggered-*`. El binding entrega `body.after` como SHA; por eso la Task clona el repositorio y después ejecuta `git checkout`, en lugar de usar `git clone --branch`.
 
-```
-NAME                                STARTED         DURATION   STATUS
-webapp-chart-ci-triggered-xxxxx     5 seconds ago   ---        Running
-webapp-chart-ci-run-xxxxx           2 minutes ago   1m30s      Succeeded
+5. Para una prueba de push real:
+
+```bash
+cd ~/k8s-labs/lab07
+git commit --allow-empty -m 'ci: validar webhook Tekton'
+git push origin main
 ```
 
 ### Verificación
 
 ```bash
-kubectl get pipelinerun -n webapp --sort-by=.metadata.creationTimestamp | tail -2
+TRIGGERED=$(kubectl get pipelinerun -n webapp \
+  -o name --sort-by=.metadata.creationTimestamp | tail -1)
+kubectl wait --for=condition=Succeeded "$TRIGGERED" -n webapp --timeout=600s
+kubectl get "$TRIGGERED" -n webapp \
+  -o jsonpath='{.status.conditions[0].status}{" "}{.status.conditions[0].reason}{"\n"}'
 ```
 
 ---
@@ -1558,7 +1297,7 @@ sed -i 's/^version: 1.2.0/version: 1.2.0-broken/' Chart.yaml
 cat > tests/broken_test.yaml <<'EOF'
 suite: Broken test - should fail
 templates:
-  - deployment.yaml
+  - templates/deployment.yaml
 tests:
   - it: debe fallar intencionalmente
     set:
@@ -1646,10 +1385,10 @@ echo "4. Verificar charts en ChartMuseum:"
 helm search repo chartmuseum/webapp --versions
 
 echo "5. Verificar pipeline Tekton existe:"
-tkn pipeline list -n webapp
+kubectl get pipeline -n webapp
 
 echo "6. Verificar PipelineRuns ejecutados:"
-tkn pipelinerun list -n webapp --limit 5
+kubectl get pipelinerun -n webapp --sort-by=.metadata.creationTimestamp
 
 echo "7. Verificar EventListener activo:"
 kubectl get eventlistener -n webapp -o jsonpath='{.items[0].status.conditions[0].status}'
@@ -1689,12 +1428,18 @@ helm unittest .
 
 **Síntomas:** Tras hacer push a Gitea, no se crea ningún PipelineRun nuevo. Los logs del EventListener no muestran actividad.
 
-**Causa:** La URL del webhook en Gitea apunta a un servicio inaccesible desde la red del pod de Gitea. Los servicios entre namespaces requieren el FQDN completo `<svc>.<namespace>.svc.cluster.local`.
+**Causa:** La URL no usa el FQDN interno o Gitea bloquea el destino privado mediante `webhook.ALLOWED_HOST_LIST`.
 
 **Solución:**
 ```bash
 # Verificar el nombre del servicio del EventListener
 kubectl get svc -n webapp -l eventlistener=webapp-chart-listener
+
+# Autorizar solamente el FQDN del EventListener y conservar Recreate
+helm upgrade gitea gitea-charts/gitea -n gitea --reuse-values \
+  --set strategy.type=Recreate \
+  --set-string gitea.config.webhook.ALLOWED_HOST_LIST=el-webapp-chart-listener.webapp.svc.cluster.local \
+  --wait --timeout 300s
 
 # Verificar conectividad desde un pod en el namespace gitea
 kubectl run test-curl --rm -i --restart=Never -n gitea \
@@ -1706,12 +1451,12 @@ EL_SVC_NAME=$(kubectl get svc -n webapp -l eventlistener=webapp-chart-listener -
 echo "URL correcta: http://${EL_SVC_NAME}.webapp.svc.cluster.local:8080"
 
 # Listar hooks y actualizar
-HOOK_ID=$(curl -s "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks" \
-  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+HOOK_ID=$(curl -s "$GITEA_URL/api/v1/repos/admin/webapp-chart/hooks" \
+  -u "admin:${GITEA_ADMIN_PASSWORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
 
-curl -X PATCH "$GITEA_URL/api/v1/repos/gitea-admin/webapp-chart/hooks/$HOOK_ID" \
+curl -X PATCH "$GITEA_URL/api/v1/repos/admin/webapp-chart/hooks/$HOOK_ID" \
   -H "Content-Type: application/json" \
-  -u "gitea-admin:${GITEA_ADMIN_PASSWORD}" \
+  -u "admin:${GITEA_ADMIN_PASSWORD}" \
   -d "{\"config\": {\"url\": \"http://${EL_SVC_NAME}.webapp.svc.cluster.local:8080\", \"content_type\": \"json\"}}"
 ```
 
@@ -1725,10 +1470,11 @@ pkill -f "port-forward.*chartmuseum" || true
 pkill -f "port-forward.*gitea" || true
 
 # Eliminar PipelineRuns antiguos (conservar los últimos 2)
-tkn pipelinerun delete -n webapp --keep 2 -f
+kubectl get pipelinerun -n webapp --sort-by=.metadata.creationTimestamp \
+  -o name | head -n -2 | xargs -r kubectl delete -n webapp
 
 # Eliminar recursos de triggers si se desea
-# kubectl delete -f ~/k8s-labs/lab07/pipeline/triggers.yaml
+# kubectl delete -f KUB_ADV/Capitulo07/tekton/triggers.yaml
 
 # Eliminar workspace PVC (opcional)
 # kubectl delete pvc chart-workspace -n webapp

@@ -158,13 +158,8 @@ metrics:
   prometheus:
     enabled: true
 gateway:
-  listeners:
-    web:
-      namespacePolicy:
-        from: All
-    websecure:
-      namespacePolicy:
-        from: All
+  # El Gateway se crea explícitamente en el Paso 8 con TLS y rutas.
+  enabled: false
 EOF
 ```
 
@@ -487,7 +482,7 @@ spec:
       initContainers:
         - name: init-html
           image: busybox:1.36
-          command: ['sh', '-c', 'echo "{\"service\":\"backend\",\"version\":\"v1\",\"hostname\":\"$(hostname)\"}" > /html/index.html && echo "{\"service\":\"backend\",\"version\":\"v1\",\"status\":\"healthy\"}" > /html/health']
+          command: ['sh', '-c', 'echo "{\"service\":\"backend\",\"version\":\"v1\",\"hostname\":\"$(hostname)\"}" > /html/index.html && echo "{\"service\":\"backend\",\"version\":\"v1\",\"status\":\"healthy\"}" > /html/health && mkdir -p /html/backend && cp /html/index.html /html/backend/index.html']
           volumeMounts:
             - name: html
               mountPath: /html
@@ -533,7 +528,7 @@ spec:
       initContainers:
         - name: init-html
           image: busybox:1.36
-          command: ['sh', '-c', 'mkdir -p /html/v1 /html/v2 && echo "{\"api\":\"v1\",\"hostname\":\"$(hostname)\"}" > /html/v1/index.html && echo "{\"api\":\"v2\",\"hostname\":\"$(hostname)\"}" > /html/v2/index.html']
+          command: ['sh', '-c', 'mkdir -p /html/api/v1 /html/api/v2 && echo "{\"api\":\"v1\",\"hostname\":\"$(hostname)\"}" > /html/api/v1/index.html && echo "{\"api\":\"v2\",\"hostname\":\"$(hostname)\"}" > /html/api/v2/index.html']
           volumeMounts:
             - name: html
               mountPath: /html
@@ -582,7 +577,7 @@ spec:
       initContainers:
         - name: init-html
           image: busybox:1.36
-          command: ['sh', '-c', 'mkdir -p /html/v1 /html/v2 && echo "{\"api\":\"v2-canary\",\"hostname\":\"$(hostname)\"}" > /html/v1/index.html && echo "{\"api\":\"v2-canary\",\"hostname\":\"$(hostname)\"}" > /html/v2/index.html']
+          command: ['sh', '-c', 'mkdir -p /html/api/v1 /html/api/v2 && echo "{\"api\":\"v2-canary\",\"hostname\":\"$(hostname)\"}" > /html/api/v1/index.html && echo "{\"api\":\"v2-canary\",\"hostname\":\"$(hostname)\"}" > /html/api/v2/index.html']
           volumeMounts:
             - name: html
               mountPath: /html
@@ -843,13 +838,15 @@ spec:
   listeners:
     - name: http
       protocol: HTTP
-      port: 80
+      # Puerto interno del entryPoint web de Traefik; el host sigue usando el NodePort 30080/80.
+      port: 8000
       allowedRoutes:
         namespaces:
           from: All
     - name: https
       protocol: HTTPS
-      port: 443
+      # Puerto interno del entryPoint websecure de Traefik; el host sigue usando el NodePort 30443/443.
+      port: 8443
       tls:
         mode: Terminate
         certificateRefs:

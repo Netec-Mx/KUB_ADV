@@ -1,0 +1,17 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: webapp-chart-ci-run-
+  namespace: webapp
+spec:
+  pipelineRef:
+    name: webapp-chart-ci
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: chart-workspace
+  taskRunTemplate:
+    serviceAccountName: pipeline-sa
+    podTemplate:
+      tolerations:
+        - operator: Exists

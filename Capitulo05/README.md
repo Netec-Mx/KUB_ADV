@@ -117,6 +117,13 @@ spec:
       labels:
         app: alertmanager-webhook
     spec:
+      tolerations:
+        - key: workload-type
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: webhook
           image: python:3.11-slim
@@ -209,7 +216,7 @@ kubectl get pods -n monitoring -l app=alertmanager-webhook
 1. Crear el archivo de valores principal:
 
 ```bash
-cat > ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml << 'EOF'
+cat > ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml << EOF
 # kube-prometheus-stack 61.3.0 - Valores personalizados
 fullnameOverride: ""
 namespaceOverride: "monitoring"
@@ -218,6 +225,13 @@ namespaceOverride: "monitoring"
 prometheus:
   prometheusSpec:
     replicas: 1
+    tolerations:
+      - key: workload-type
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
     retention: 7d
     retentionSize: "18GB"
     scrapeInterval: 30s
@@ -255,6 +269,13 @@ prometheus:
 alertmanager:
   alertmanagerSpec:
     replicas: 1
+    tolerations:
+      - key: workload-type
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
     resources:
       requests:
         memory: "128Mi"
@@ -316,6 +337,13 @@ alertmanager:
 # --- Grafana ---
 grafana:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
   adminUser: admin
   admin:
     existingSecret: grafana-admin
@@ -341,27 +369,49 @@ grafana:
   additionalDataSources:
     - name: Elasticsearch
       type: elasticsearch
-      url: http://elasticsearch-master.logging.svc:9200
+      url: https://elasticsearch-master.logging.svc:9200
       access: proxy
       basicAuth: true
       basicAuthUser: elastic
       secureJsonData:
          basicAuthPassword: "${ELASTIC_PASSWORD}"
       jsonData:
-        index: "filebeat-*"
+        tlsSkipVerify: true
+        index: "kubernetes-*"
         timeField: "@timestamp"
         esVersion: "8.0.0"
 
 # --- Node Exporter ---
 nodeExporter:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
 # --- kube-state-metrics ---
 kubeStateMetrics:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
 # --- Prometheus Operator ---
 prometheusOperator:
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
   resources:
     requests:
       memory: "128Mi"
@@ -399,6 +449,18 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   -f ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml \
   --timeout 10m \
   --wait
+```
+
+Si el chart queda bloqueado en `kube-prometheus-stack-admission-create` por los taints del Lab03, aplica temporalmente este procedimiento para completar el hook y vuelve a colocar los taints al finalizar:
+
+```bash
+kubectl taint node lab-calico-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint node lab-calico-worker workload-type=compute:NoSchedule-
+kubectl taint node lab-calico-worker2 workload-type=memory:NoSchedule-
+kubectl wait --for=condition=complete job/kube-prometheus-stack-admission-create -n monitoring --timeout=180s
+kubectl taint node lab-calico-control-plane node-role.kubernetes.io/control-plane:NoSchedule --overwrite
+kubectl taint node lab-calico-worker workload-type=compute:NoSchedule --overwrite
+kubectl taint node lab-calico-worker2 workload-type=memory:NoSchedule --overwrite
 ```
 
 2. Verificar que todos los componentes están running:

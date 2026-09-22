@@ -76,6 +76,30 @@ lab-calico-worker2         Ready    <none>          ...   v1.35.8
 
 ---
 
+## Preservar los workloads de los laboratorios anteriores
+
+Antes de aplicar taints a los workers, añade tolerations a los deployments persistentes del Lab 02. Los pods existentes no son expulsados por `NoSchedule`, pero un reinicio posterior podría quedar en `Pending` si no tolera ambos valores:
+
+```bash
+for item in \
+  webapp/webapp-frontend webapp/webapp-backend webapp/webapp-api webapp/webapp-api-canary \
+  traefik/traefik cert-manager/cert-manager cert-manager/cert-manager-cainjector cert-manager/cert-manager-webhook; do
+  ns=${item%%/*}; deploy=${item##*/}
+  kubectl patch deployment "$deploy" -n "$ns" --type='merge' \
+    -p='{"spec":{"template":{"spec":{"tolerations":[{"key":"workload-type","operator":"Exists","effect":"NoSchedule"}]}}}}'
+done
+```
+
+Verifica que los deployments sigan disponibles antes de continuar:
+
+```bash
+kubectl get deployments -n webapp
+kubectl get deployments -n traefik
+kubectl get deployments -n cert-manager
+```
+
+---
+
 ## Paso 1: Etiquetar nodos con zonas de disponibilidad y tipo de hardware
 
 **Objetivo:** Añadir labels a los nodos workers para simular zonas de disponibilidad (`zone-a`, `zone-b`) y tipos de hardware (`compute`, `memory`).
@@ -519,7 +543,8 @@ metadata:
   name: batch-jobs
   namespace: webapp
 spec:
-  replicas: 6
+  # 16 réplicas de 500m saturan los dos workers de 4 CPU del entorno kind y hacen observable la preemption.
+  replicas: 16
   selector:
     matchLabels:
       app: batch-jobs
@@ -688,6 +713,30 @@ subjects:
 roleRef:
   kind: Role
   name: extension-apiserver-authentication-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: custom-scheduler-leader-election
+  namespace: kube-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: custom-scheduler-leader-election
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: custom-scheduler-sa
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: custom-scheduler-leader-election
   apiGroup: rbac.authorization.k8s.io
 EOF
 ```

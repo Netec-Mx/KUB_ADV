@@ -37,8 +37,8 @@ Este laboratorio implementa una capa completa de seguridad sobre el clúster `la
 |-------------|---------|--------------|
 | kubectl | 1.35.x | `kubectl version --client` |
 | Helm | 3.20.x | `helm version` |
-| kubeseal | 0.27.1 | `kubeseal --version` |
-| Trivy | 0.53.0 | `trivy --version` |
+| kubeseal | 0.40.0 | `kubeseal --version` |
+| Trivy | 0.74.0 | `trivy --version` |
 | kustomize | 5.4.2 | `kustomize version` |
 | kind | 0.33.0 | `kind version` |
 
@@ -416,7 +416,7 @@ cat > ~/k8s-labs/lab08/network-policies/webapp-allow.yaml << 'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-from-nginx
+  name: allow-ingress-from-traefik
   namespace: webapp
 spec:
   podSelector: {}
@@ -487,7 +487,7 @@ cat > ~/k8s-labs/lab08/network-policies/monitoring-allow.yaml << 'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-from-nginx
+  name: allow-ingress-from-traefik
   namespace: monitoring
 spec:
   podSelector: {}
@@ -655,6 +655,140 @@ EOF
 kubectl apply -f ~/k8s-labs/lab08/network-policies/operator-allow.yaml
 ```
 
+6. Preservar la comunicación interna y las dependencias acumuladas de Labs 01–07:
+
+```bash
+cat > ~/k8s-labs/lab08/network-policies/continuity-allow.yaml << 'EOF'
+# webapp contiene la aplicación, PostgreSQL, PipelineRuns y EventListener.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-labs-continuity
+  namespace: webapp
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitea
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitea
+      ports:
+        - {protocol: TCP, port: 3000}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: helm-registry
+      ports:
+        - {protocol: TCP, port: 8080}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - {protocol: TCP, port: 80}
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+---
+# Elasticsearch, Jaeger, Kibana y Fluentd requieren comunicación interna.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-logging-continuity
+  namespace: logging
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [webapp, monitoring, traefik]
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+---
+# Prometheus consulta el API Server, kubelets y exporters en los nodos.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-control-plane
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+        - {protocol: TCP, port: 10250}
+---
+# Traefik y el operador observan recursos mediante el API Server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-apiserver
+  namespace: traefik
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-operator-apiserver-https
+  namespace: webapp-operator-system
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - {protocol: TCP, port: 443}
+EOF
+
+kubectl apply -f ~/k8s-labs/lab08/network-policies/continuity-allow.yaml
+```
+
+> No omita estas políticas: el namespace `webapp` también aloja PostgreSQL y
+> Tekton, mientras `logging` contiene componentes que se comunican entre sí.
+> Aplicar únicamente `default-deny` interrumpe la arquitectura acumulada.
+
 ### Verificación
 
 ```bash
@@ -679,13 +813,14 @@ done
 1. Instalar el controlador Sealed Secrets:
 
 ```bash
-helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
 helm repo update
 
-helm install sealed-secrets sealed-secrets/sealed-secrets \
+helm upgrade --install sealed-secrets sealed-secrets/sealed-secrets \
   --namespace kube-system \
-  --version 2.16.1 \
+  --version 2.20.0 \
   --set-string fullnameOverride=sealed-secrets-controller \
+  --set tolerations[0].operator=Exists \
   --wait
 ```
 
@@ -741,15 +876,17 @@ kubectl apply -f ~/k8s-labs/lab08/sealed-secrets/es-credentials-sealed.yaml
 ```bash
 kubectl get secret elasticsearch-credentials -n logging -o jsonpath='{.data.username}' | base64 -d
 echo
-kubectl get secret elasticsearch-credentials -n logging -o jsonpath='{.data.password}' | base64 -d
-echo
+# Verificar que existe un valor sin imprimir la credencial
+test "$(kubectl get secret elasticsearch-credentials -n logging \
+  -o jsonpath='{.data.password}' | base64 -d | wc -c)" -gt 0
+echo "password presente"
 ```
 
 ### Salida Esperada
 
 ```
 elastic
-<valor generado en ELASTIC_PASSWORD>
+password presente
 ```
 
 ### Verificación
@@ -796,8 +933,8 @@ rules:
       - "/readyz*"
       - "/livez*"
 
-  # RequestResponse para operaciones sobre Secrets
-  - level: RequestResponse
+  # Metadata para mutaciones de Secrets: nunca registrar el cuerpo sensible
+  - level: Metadata
     resources:
       - group: ""
         resources: ["secrets"]
@@ -832,123 +969,81 @@ rules:
 EOF
 ```
 
-2. Recrear el clúster kind con auditoría habilitada. Primero, crear la configuración:
+2. Respaldar el manifiesto actual antes de modificarlo y copiar la política al nodo:
 
 ```bash
-cat > ~/k8s-labs/lab08/audit/kind-config-audit.yaml << 'EOF'
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: lab-calico
-nodes:
-  - role: control-plane
-    image: kindest/node:v1.35.8
-    kubeadmConfigPatches:
-      - |
-        kind: ClusterConfiguration
-        apiServer:
-          extraArgs:
-            audit-log-path: /var/log/kubernetes/audit.log
-            audit-policy-file: /etc/kubernetes/audit-policy.yaml
-            audit-log-maxage: "7"
-            audit-log-maxbackup: "3"
-            audit-log-maxsize: "100"
-          extraVolumes:
-            - name: audit-policy
-              hostPath: /etc/kubernetes/audit-policy.yaml
-              mountPath: /etc/kubernetes/audit-policy.yaml
-              readOnly: true
-              pathType: File
-            - name: audit-logs
-              hostPath: /var/log/kubernetes
-              mountPath: /var/log/kubernetes
-              readOnly: false
-              pathType: DirectoryOrCreate
-    extraMounts:
-      - hostPath: ./audit-policy.yaml
-        containerPath: /etc/kubernetes/audit-policy.yaml
-        readOnly: true
-  - role: worker
-    image: kindest/node:v1.35.8
-  - role: worker
-    image: kindest/node:v1.35.8
-networking:
-  disableDefaultCNI: true
-  podSubnet: "10.244.0.0/16"
-  serviceSubnet: "10.96.0.0/16"
-EOF
-```
-
-3. Aplicar la política de auditoría al nodo control-plane existente (sin recrear el clúster):
-
-```bash
-# Copiar la política de auditoría al nodo control-plane
-docker cp ~/k8s-labs/lab08/audit/audit-policy.yaml \
-  lab-calico-control-plane:/etc/kubernetes/audit-policy.yaml
-
-# Crear directorio de logs
+docker cp lab-calico-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml   ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml
+docker cp ~/k8s-labs/lab08/audit/audit-policy.yaml   lab-calico-control-plane:/etc/kubernetes/audit-policy.yaml
 docker exec lab-calico-control-plane mkdir -p /var/log/kubernetes
-
-# Modificar el manifiesto estático del API Server para habilitar auditoría
-docker exec lab-calico-control-plane bash -c '
-cat /etc/kubernetes/manifests/kube-apiserver.yaml | \
-  sed "/- --tls-private-key-file/a\\    - --audit-log-path=/var/log/kubernetes/audit.log\n    - --audit-policy-file=/etc/kubernetes/audit-policy.yaml\n    - --audit-log-maxage=7\n    - --audit-log-maxbackup=3\n    - --audit-log-maxsize=100" | \
-  sed "/volumeMounts:/a\\    - mountPath: /etc/kubernetes/audit-policy.yaml\n      name: audit-policy\n      readOnly: true\n    - mountPath: /var/log/kubernetes\n      name: audit-logs" | \
-  sed "/volumes:/a\\  - hostPath:\n      path: /etc/kubernetes/audit-policy.yaml\n      type: File\n    name: audit-policy\n  - hostPath:\n      path: /var/log/kubernetes\n      type: DirectoryOrCreate\n    name: audit-logs" \
-  > /tmp/kube-apiserver.yaml && \
-  cp /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/kube-apiserver.yaml
-'
 ```
 
-> **Nota:** Si la modificación in-place del manifiesto estático resulta compleja, use el método alternativo con `kubectl` patch o recree el clúster con la configuración del paso 2.
-
-4. Método alternativo más fiable — parchear directamente:
+3. Crear un manifiesto parcheado idempotente, separado del respaldo:
 
 ```bash
-# Extraer el manifiesto actual
-docker cp lab-calico-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml \
-  ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml
-
-# Crear script de patch
 cat > ~/k8s-labs/lab08/audit/patch-apiserver.py << 'PYEOF'
-import yaml, sys
+from pathlib import Path
+import sys
+import yaml
 
-with open(sys.argv[1]) as f:
-    manifest = yaml.safe_load(f)
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+manifest = yaml.safe_load(source.read_text())
+container = manifest["spec"]["containers"][0]
 
-# Añadir args
-args = manifest['spec']['containers'][0]['command']
-audit_args = [
-    '--audit-log-path=/var/log/kubernetes/audit.log',
-    '--audit-policy-file=/etc/kubernetes/audit-policy.yaml',
-    '--audit-log-maxage=7',
-    '--audit-log-maxbackup=3',
-    '--audit-log-maxsize=100'
-]
-for a in audit_args:
-    if a not in args:
-        args.append(a)
+audit_args = {
+    "--audit-log-path=/var/log/kubernetes/audit.log",
+    "--audit-policy-file=/etc/kubernetes/audit-policy.yaml",
+    "--audit-log-maxage=7",
+    "--audit-log-maxbackup=3",
+    "--audit-log-maxsize=100",
+}
+container["command"] = [
+    arg for arg in container["command"]
+    if not arg.startswith("--audit-")
+] + sorted(audit_args)
 
-# Añadir volumeMounts
-vmounts = manifest['spec']['containers'][0]['volumeMounts']
-vmounts.append({'mountPath': '/etc/kubernetes/audit-policy.yaml', 'name': 'audit-policy', 'readOnly': True})
-vmounts.append({'mountPath': '/var/log/kubernetes', 'name': 'audit-logs'})
+mounts = [m for m in container.get("volumeMounts", [])
+          if m.get("name") not in {"audit-policy", "audit-logs"}]
+mounts.extend([
+    {"mountPath": "/etc/kubernetes/audit-policy.yaml", "name": "audit-policy", "readOnly": True},
+    {"mountPath": "/var/log/kubernetes", "name": "audit-logs"},
+])
+container["volumeMounts"] = mounts
 
-# Añadir volumes
-vols = manifest['spec']['volumes']
-vols.append({'hostPath': {'path': '/etc/kubernetes/audit-policy.yaml', 'type': 'File'}, 'name': 'audit-policy'})
-vols.append({'hostPath': {'path': '/var/log/kubernetes', 'type': 'DirectoryOrCreate'}, 'name': 'audit-logs'})
-
-with open(sys.argv[1], 'w') as f:
-    yaml.dump(manifest, f, default_flow_style=False)
+volumes = [v for v in manifest["spec"].get("volumes", [])
+           if v.get("name") not in {"audit-policy", "audit-logs"}]
+volumes.extend([
+    {"hostPath": {"path": "/etc/kubernetes/audit-policy.yaml", "type": "File"}, "name": "audit-policy"},
+    {"hostPath": {"path": "/var/log/kubernetes", "type": "DirectoryOrCreate"}, "name": "audit-logs"},
+])
+manifest["spec"]["volumes"] = volumes
+target.write_text(yaml.safe_dump(manifest, sort_keys=False))
 PYEOF
 
-# Ejecutar el patch
-pip3 install pyyaml -q 2>/dev/null
-python3 ~/k8s-labs/lab08/audit/patch-apiserver.py ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml
+python3 ~/k8s-labs/lab08/audit/patch-apiserver.py   ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml   ~/k8s-labs/lab08/audit/kube-apiserver-audit.yaml
+grep -c -- '--audit-' ~/k8s-labs/lab08/audit/kube-apiserver-audit.yaml
+# Esperado: 5
+```
 
-# Copiar el manifiesto parcheado de vuelta
-docker cp ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml \
-  lab-calico-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml
+4. Aplicar el manifiesto con restauración automática si el API Server no regresa:
+
+```bash
+docker cp ~/k8s-labs/lab08/audit/kube-apiserver-audit.yaml   lab-calico-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml
+
+ok=false
+for i in $(seq 1 45); do
+  if kubectl get --raw=/readyz --request-timeout=3s >/dev/null 2>&1; then
+    ok=true
+    break
+  fi
+  sleep 2
+done
+
+if [ "$ok" != true ]; then
+  docker cp ~/k8s-labs/lab08/audit/kube-apiserver-original.yaml     lab-calico-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml
+  echo "Se restauró el manifiesto original" >&2
+  exit 1
+fi
 ```
 
 5. Esperar a que el API Server reinicie y verificar:
@@ -990,11 +1085,25 @@ docker exec lab-calico-control-plane grep 'rbac.authorization.k8s.io' /var/log/k
 
 ### Instrucciones
 
+Si Trivy no está instalado, descargar el binario oficial y eliminar el archivo
+temporal después de instalarlo:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+curl -fsSL \
+  https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz \
+  -o /tmp/trivy.tgz
+tar -xzf /tmp/trivy.tgz -C /tmp trivy
+install -m 0755 /tmp/trivy "$HOME/.local/bin/trivy"
+rm -f /tmp/trivy /tmp/trivy.tgz
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 1. Escanear las imágenes principales del clúster:
 
 ```bash
-# Obtener las imágenes en uso en el namespace webapp
-WEBAPP_IMAGES=$(kubectl get pods -n webapp -o jsonpath='{.items[*].spec.containers[*].image}' | tr ' ' '\n' | sort -u)
+# Limitar el ejercicio a imágenes activas y representativas para conservar la duración
+WEBAPP_IMAGES="nginx:1.27-alpine"
 
 echo "Imágenes en webapp:"
 echo "$WEBAPP_IMAGES"
@@ -1028,9 +1137,11 @@ cat ~/k8s-labs/lab08/scanning/trivy-reports/k8s-config-scan.txt
 3. Escanear una imagen específica de infraestructura:
 
 ```bash
-# Escanear la imagen del controlador Traefik
+# Obtener y escanear la imagen realmente instalada de Traefik
+TRAEFIK_IMAGE=$(kubectl get deployment traefik -n traefik \
+  -o jsonpath='{.spec.template.spec.containers[0].image}')
 trivy image --severity HIGH,CRITICAL \
-  traefik:v3.7.13 \
+  "$TRAEFIK_IMAGE" \
   2>/dev/null | tee ~/k8s-labs/lab08/scanning/trivy-reports/traefik.txt
 ```
 
@@ -1040,6 +1151,9 @@ trivy image --severity HIGH,CRITICAL \
 # Verificar que se generaron reportes
 ls -la ~/k8s-labs/lab08/scanning/trivy-reports/
 # Debe haber al menos 2 archivos .txt
+
+# En una VM con poco disco, conservar reportes y retirar la caché descargable
+rm -rf "$HOME/.cache/trivy"
 ```
 
 ---
@@ -1061,11 +1175,6 @@ driver:
   kind: modern_ebpf
 
 falco:
-  rules_file:
-    - /etc/falco/falco_rules.yaml
-    - /etc/falco/falco_rules.local.yaml
-    - /etc/falco/rules.d
-
   json_output: true
   log_stderr: true
   log_syslog: false
@@ -1077,7 +1186,7 @@ customRules:
       condition: >
         spawned_process and container and
         k8s.ns.name = "webapp" and
-        proc.pname = "runc:[2:INIT]"
+        proc.name in (sh, bash) and not proc.cmdline contains "pg_isready"
       output: >
         Shell exec detected in production (user=%user.name command=%proc.cmdline
         container=%container.name namespace=%k8s.ns.name pod=%k8s.pod.name)
@@ -1106,12 +1215,14 @@ customRules:
       tags: [token, kubernetes]
 
 tty: true
+tolerations:
+  - operator: Exists
 EOF
 
-helm install falco falcosecurity/falco \
+helm upgrade --install falco falcosecurity/falco \
   --namespace falco \
   --create-namespace \
-  --version 4.7.2 \
+  --version 9.2.0 \
   --values ~/k8s-labs/lab08/scanning/falco-values.yaml \
   --wait --timeout 120s
 ```
@@ -1127,10 +1238,11 @@ kubectl -n falco logs -l app.kubernetes.io/name=falco --tail=20
 
 ```bash
 # Ejecutar un exec en un pod de webapp (si existe)
-WEBAPP_POD=$(kubectl get pods -n webapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+WEBAPP_POD=$(kubectl get pods -n webapp --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
 if [ -n "$WEBAPP_POD" ]; then
-  kubectl exec -n webapp "$WEBAPP_POD" -- ls /etc/hostname 2>/dev/null || true
+  kubectl exec -n webapp "$WEBAPP_POD" -- sh -c 'cat /etc/hostname' || true
 fi
 
 # Esperar unos segundos y revisar logs de Falco
@@ -1153,7 +1265,7 @@ kubectl -n falco logs -l app.kubernetes.io/name=falco | grep -i "custom-rules" |
 
 ## Paso 7: Benchmark CIS con kube-bench
 
-**Objetivo:** Ejecutar kube-bench con perfil CIS 1.9 y documentar los hallazgos de seguridad.
+**Objetivo:** Ejecutar kube-bench 0.15.6 con el perfil CIS 1.11 disponible y documentar los hallazgos. Kubernetes 1.35 aún no dispone de un perfil exacto en kube-bench, por lo que el resultado es orientativo.
 
 ### Instrucciones
 
@@ -1178,8 +1290,8 @@ spec:
           effect: NoSchedule
       containers:
         - name: kube-bench
-          image: aquasec/kube-bench:v0.8.0
-          command: ["kube-bench", "run", "--targets", "master", "--benchmark", "cis-1.9"]
+          image: aquasec/kube-bench:v0.15.6
+          command: ["kube-bench", "run", "--targets", "master", "--benchmark", "cis-1.11"]
           volumeMounts:
             - name: var-lib-etcd
               mountPath: /var/lib/etcd
@@ -1243,10 +1355,12 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+      tolerations:
+        - operator: Exists
       containers:
         - name: kube-bench
-          image: aquasec/kube-bench:v0.8.0
-          command: ["kube-bench", "run", "--targets", "node", "--benchmark", "cis-1.9"]
+          image: aquasec/kube-bench:v0.15.6
+          command: ["kube-bench", "run", "--targets", "node", "--benchmark", "cis-1.11"]
           volumeMounts:
             - name: etc-kubernetes
               mountPath: /etc/kubernetes
@@ -1277,11 +1391,14 @@ tail -10 ~/k8s-labs/lab08/scanning/kube-bench-worker-results.txt
 
 ```
 == Summary master ==
-45 checks PASS
-12 checks FAIL
-18 checks WARN
+40 checks PASS
+9 checks FAIL
+11 checks WARN
 0 checks INFO
 ```
+
+Los totales pueden variar con la versión de kind. Los `FAIL` son hallazgos para
+analizar; no significan que el Job haya fallado.
 
 ### Verificación
 
@@ -1298,7 +1415,7 @@ grep "\[FAIL\]" ~/k8s-labs/lab08/scanning/kube-bench-results.txt | head -5
 
 ## Paso 8: Aplicar SecurityContext con Kustomize
 
-**Objetivo:** Crear overlays de kustomize que añadan SecurityContext restrictivo (runAsNonRoot, readOnlyRootFilesystem, allowPrivilegeEscalation: false) a los Deployments del namespace webapp.
+**Objetivo:** Crear un overlay de Kustomize que aplique un SecurityContext restrictivo a un Deployment demostrativo aislado, sin modificar las aplicaciones acumuladas de Labs anteriores.
 
 ### Instrucciones
 
@@ -1334,44 +1451,38 @@ spec:
 EOF
 ```
 
-3. Obtener los Deployments actuales del namespace webapp y crear la base:
+3. Crear una base aislada para la demostración. No exporte ni reaplique todos los Deployments existentes del namespace:
 
 ```bash
-# Exportar deployments actuales
-kubectl get deployments -n webapp -o yaml > ~/k8s-labs/lab08/security-contexts/base/deployments.yaml 2>/dev/null
-
-# Si no hay deployments en webapp, crear uno de ejemplo
-if [ ! -s ~/k8s-labs/lab08/security-contexts/base/deployments.yaml ]; then
-cat > ~/k8s-labs/lab08/security-contexts/base/deployments.yaml << 'EOF'
+cat > ~/k8s-labs/lab08/security-contexts/base/deployment.yaml << 'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: webapp-demo
+  name: webapp-hardened-demo
   namespace: webapp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: webapp-demo
+      app: webapp-hardened-demo
   template:
     metadata:
       labels:
-        app: webapp-demo
+        app: webapp-hardened-demo
     spec:
+      tolerations:
+        - operator: Exists
       containers:
         - name: webapp
-          image: nginx:1.27-alpine
-          ports:
-            - containerPort: 8080
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 3600"]
 EOF
-fi
 
-# Crear kustomization.yaml base
 cat > ~/k8s-labs/lab08/security-contexts/base/kustomization.yaml << 'EOF'
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - deployments.yaml
+  - deployment.yaml
 EOF
 ```
 
@@ -1386,11 +1497,14 @@ resources:
 patches:
   - target:
       kind: Deployment
+      name: webapp-hardened-demo
     patch: |-
       - op: add
         path: /spec/template/spec/securityContext
         value:
           runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
           seccompProfile:
             type: RuntimeDefault
       - op: add
@@ -1408,33 +1522,34 @@ EOF
 
 ```bash
 # Previsualizar el resultado
-kustomize build ~/k8s-labs/lab08/security-contexts/overlays/hardened/
+kubectl kustomize ~/k8s-labs/lab08/security-contexts/overlays/hardened/
 
 # Aplicar al clúster
-kustomize build ~/k8s-labs/lab08/security-contexts/overlays/hardened/ | kubectl apply -n webapp -f -
+kubectl kustomize ~/k8s-labs/lab08/security-contexts/overlays/hardened/ | kubectl apply -n webapp -f -
 ```
 
 6. Verificar que el SecurityContext se aplicó:
 
 ```bash
-kubectl get deployment -n webapp -o jsonpath='{range .items[*]}{.metadata.name}: runAsNonRoot={.spec.template.spec.securityContext.runAsNonRoot}, readOnlyRootFilesystem={.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem}{"\n"}{end}'
+kubectl get deployment webapp-hardened-demo -n webapp -o jsonpath='{.metadata.name}: runAsNonRoot={.spec.template.spec.securityContext.runAsNonRoot}, readOnlyRootFilesystem={.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem}{"\n"}'
 ```
 
 ### Salida Esperada
 
 ```
-webapp-demo: runAsNonRoot=true, readOnlyRootFilesystem=true
+webapp-hardened-demo: runAsNonRoot=true, readOnlyRootFilesystem=true
 ```
 
 ### Verificación
 
 ```bash
 # Verificar que allowPrivilegeEscalation es false
-kubectl get deployment -n webapp -o yaml | grep -A3 "securityContext" | grep "allowPrivilegeEscalation"
+kubectl get deployment webapp-hardened-demo -n webapp -o yaml | \
+  grep -A3 "securityContext" | grep "allowPrivilegeEscalation"
 # Esperado: allowPrivilegeEscalation: false
 
 # Verificar que capabilities DROP ALL está presente
-kubectl get deployment -n webapp -o yaml | grep -A5 "capabilities"
+kubectl get deployment webapp-hardened-demo -n webapp -o yaml | grep -A5 "capabilities"
 ```
 
 ---
@@ -1640,7 +1755,7 @@ En este laboratorio se implementó una estrategia de seguridad en profundidad so
 | **Auditoría** | API Server audit logging multinivel | ✅ Configurado |
 | **Escaneo de vulnerabilidades** | Trivy sobre imágenes y configuración | ✅ Ejecutado |
 | **Runtime security** | Falco con reglas personalizadas | ✅ Desplegado |
-| **Benchmark CIS** | kube-bench cis-1.9 | ✅ Documentado |
+| **Benchmark CIS** | kube-bench 0.15.6 con CIS 1.11 de referencia | ✅ Documentado |
 | **Hardening de pods** | SecurityContext vía kustomize overlays | ✅ Aplicado |
 
 ### Principios Clave Aplicados
@@ -1654,6 +1769,6 @@ En este laboratorio se implementó una estrategia de seguridad en profundidad so
 
 - [CIS Kubernetes Benchmark](https://www.cisecurity.org/benchmark/kubernetes)
 - [Kubernetes RBAC Good Practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/)
-- [Sealed Secrets Documentation](https://github.com/bitnami-labs/sealed-secrets)
+- [Sealed Secrets Documentation](https://github.com/bitnami/sealed-secrets)
 - [Falco Rules Reference](https://falco.org/docs/reference/rules/)
 - [Kubernetes Audit Policy](https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/)

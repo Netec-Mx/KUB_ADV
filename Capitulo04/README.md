@@ -16,7 +16,7 @@ En este laboratorio se construirá una infraestructura completa de logging y tra
 
 - [ ] Desplegar Elasticsearch 8.14.1 en modo single-node con almacenamiento persistente y Kibana 8.14.1 para visualización de logs
 - [ ] Configurar Fluentd 1.17.0 como DaemonSet con parsers y filtros de enriquecimiento de metadatos Kubernetes
-- [ ] Desplegar Jaeger 1.58.0 con el Jaeger Operator usando Elasticsearch como backend de almacenamiento
+- [ ] Desplegar Jaeger en estrategia production con Jaeger Operator 1.61.0 usando Elasticsearch como backend de almacenamiento
 - [ ] Instrumentar la aplicación `webapp` con OpenTelemetry Collector 0.103.0 como sidecar para captura y propagación de trazas
 - [ ] Implementar correlación logs-trazas mediante trace-id propagation visible en Kibana y Jaeger UI
 
@@ -46,7 +46,7 @@ En este laboratorio se construirá una infraestructura completa de logging y tra
 | Elasticsearch | 8.14.1 |
 | Kibana | 8.14.1 |
 | Fluentd | 1.17.0 |
-| Jaeger / Jaeger Operator | 1.58.0 |
+| Jaeger / Jaeger Operator | Jaeger Operator 1.61.0 (chart actual); CR en estrategia production |
 | OpenTelemetry Collector | 0.103.0 |
 | Helm | 3.20.x o posterior compatible |
 | kubectl | 1.35.x |
@@ -67,10 +67,6 @@ kubectl create namespace logging --dry-run=client -o yaml | kubectl apply --cont
 
 # Generar una credencial efímera para el laboratorio y guardarla como Secret.
 # No la subas al repositorio ni la reutilices fuera del clúster desechable.
-export ELASTIC_PASSWORD="${ELASTIC_PASSWORD:-$(openssl rand -hex 24)}"
-kubectl create secret generic elastic-credentials -n logging \
-  --from-literal=elastic-password="$ELASTIC_PASSWORD" \
-  --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
 
 # Verificar que vm.max_map_count está configurado en los nodos kind
 for node in $(kind get nodes --name lab-calico); do
@@ -103,6 +99,7 @@ minimumMasterNodes: 1
 
 image: "docker.elastic.co/elasticsearch/elasticsearch"
 imageTag: "8.14.1"
+protocol: https
 
 # Modo single-node
 clusterHealthCheckParams: "wait_for_status=yellow&timeout=1s"
@@ -111,10 +108,7 @@ esConfig:
   elasticsearch.yml: |
     cluster.name: "lab-logging"
     network.host: 0.0.0.0
-    discovery.type: single-node
     xpack.security.enabled: true
-    xpack.security.http.ssl.enabled: false
-    xpack.security.transport.ssl.enabled: false
 
 # Recursos para entorno kind
 resources:
@@ -132,16 +126,15 @@ volumeClaimTemplate:
     requests:
       storage: 10Gi
 
-# Variables de entorno para credenciales
-extraEnvs:
-  - name: ELASTIC_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: elastic-credentials
-        key: elastic-password
 
 # Deshabilitar antiaffinity para single-node en kind
 antiAffinity: "soft"
+
+# El Lab 03 dejó taints NoSchedule en ambos workers.
+tolerations:
+  - key: workload-type
+    operator: Exists
+    effect: NoSchedule
 
 # Service
 service:
@@ -167,8 +160,6 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 5
-
-protocol: http
 EOF
 ```
 
@@ -178,8 +169,15 @@ EOF
 helm install elasticsearch elastic/elasticsearch \
   --namespace logging \
   --values ~/k8s-labs/lab04/elasticsearch-values.yaml \
-  --version 8.14.1 \
+  --version 8.5.1 \
   --wait --timeout 5m
+```
+
+El chart no autentica su probe de readiness cuando Elasticsearch tiene HTTPS. Sustit?yelo por un probe autenticado antes de continuar:
+
+```bash
+kubectl patch statefulset elasticsearch-master -n logging --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe","value":{"exec":{"command":["sh","-c","curl --output /dev/null -k -s -u elastic:$ELASTIC_PASSWORD https://127.0.0.1:9200/ --fail"]},"initialDelaySeconds":30,"periodSeconds":10,"timeoutSeconds":5,"failureThreshold":6,"successThreshold":1}}]'
+kubectl rollout status statefulset/elasticsearch-master -n logging --timeout=180s
 ```
 
 3. Esperar a que el pod esté listo:
@@ -200,7 +198,7 @@ pod/elasticsearch-master-0 condition met
 ```bash
 # Verificar estado del clúster Elasticsearch
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cluster/health | \
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" https://localhost:9200/_cluster/health | \
   python3 -m json.tool
 ```
 
@@ -223,16 +221,9 @@ cat > ~/k8s-labs/lab04/kibana-values.yaml << 'EOF'
 image: "docker.elastic.co/kibana/kibana"
 imageTag: "8.14.1"
 
-elasticsearchHosts: "http://elasticsearch-master:9200"
+elasticsearchHosts: "https://elasticsearch-master:9200"
 
 extraEnvs:
-  - name: ELASTICSEARCH_USERNAME
-    value: "elastic"
-  - name: ELASTICSEARCH_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: elastic-credentials
-        key: elastic-password
   - name: SERVER_BASEPATH
     value: ""
 
@@ -243,6 +234,11 @@ resources:
   limits:
     cpu: "1000m"
     memory: "2Gi"
+
+tolerations:
+  - key: workload-type
+    operator: Exists
+    effect: NoSchedule
 
 service:
   type: ClusterIP
@@ -258,21 +254,28 @@ healthCheckPath: "/api/status"
 kibanaConfig:
   kibana.yml: |
     server.host: "0.0.0.0"
-    elasticsearch.hosts: ["http://elasticsearch-master:9200"]
-    elasticsearch.username: "elastic"
-    # La contraseña se inyecta mediante ELASTICSEARCH_PASSWORD desde el Secret.
+    elasticsearch.hosts: ["https://elasticsearch-master:9200"]
+    elasticsearch.ssl.verificationMode: "none"
     monitoring.ui.enabled: false
 EOF
 ```
 
-2. Instalar Kibana:
+2. Crear un token de service account y desplegar Kibana sin el hook de preinstalaci?n. El hook del chart 8.5.1 usa HTTP y no hereda los tolerations del Lab 03; con Elasticsearch en HTTPS y los workers taintados termina en `401`, `ECONNREFUSED` o `Pending`.
 
 ```bash
+export ELASTIC_PASSWORD="$(kubectl get secret elasticsearch-master-credentials -n logging -o jsonpath='{.data.password}' | base64 -d)"
+TOKEN="$(kubectl exec -n logging elasticsearch-master-0 -- \
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" -X POST \
+  https://localhost:9200/_security/service/elastic/kibana/credential/token/kibana-$(date +%s) | \
+  python3 -c 'import sys,json; print(json.load(sys.stdin)["token"]["value"])')"
+kubectl create secret generic kibana-kibana-es-token -n logging \
+  --from-literal=token="$TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+
 helm install kibana elastic/kibana \
   --namespace logging \
   --values ~/k8s-labs/lab04/kibana-values.yaml \
-  --version 8.14.1 \
-  --wait --timeout 5m
+  --version 8.5.1 \
+  --no-hooks
 ```
 
 3. Verificar que Kibana está listo:
@@ -292,7 +295,7 @@ pod/kibana-kibana-<hash> condition met
 
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana-kibana:5601/api/status | \
+  curl -s http://kibana-kibana:5601/api/status | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Kibana status: {d[\"status\"][\"overall\"][\"level\"]}')"
 ```
 
@@ -375,7 +378,8 @@ data:
       port 9200
       user elastic
       password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
-      scheme http
+      scheme https
+      ssl_verify false
       logstash_format true
       logstash_prefix kubernetes
       logstash_dateformat %Y.%m.%d
@@ -458,6 +462,9 @@ spec:
           effect: NoSchedule
         - key: node-role.kubernetes.io/master
           effect: NoSchedule
+        - key: workload-type
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: fluentd
           image: fluent/fluentd-kubernetes-daemonset:v1.17.0-debian-elasticsearch8-1.0
@@ -467,14 +474,14 @@ spec:
             - name: FLUENT_ELASTICSEARCH_PORT
               value: "9200"
             - name: FLUENT_ELASTICSEARCH_SCHEME
-              value: "http"
+              value: "https"
             - name: FLUENT_ELASTICSEARCH_USER
               value: "elastic"
             - name: FLUENT_ELASTICSEARCH_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: elastic-credentials
-                  key: elastic-password
+                  name: elasticsearch-master-credentials
+                  key: password
           resources:
             requests:
               cpu: 100m
@@ -536,7 +543,7 @@ kubectl get pods -n logging -l app=fluentd -o wide
 
 # Verificar que los índices se están creando en Elasticsearch
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cat/indices?v | grep kubernetes
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" https://localhost:9200/_cat/indices?v | grep kubernetes
 ```
 
 Debe mostrar al menos un índice con patrón `kubernetes-YYYY.MM.DD` con documentos.
@@ -554,11 +561,19 @@ Instalar el Jaeger Operator y crear una instancia Jaeger en modo producción con
 1. Instalar el Jaeger Operator mediante Helm:
 
 ```bash
-helm install jaeger-operator jaegertracing/jaeger-operator \
+helm upgrade --install jaeger-operator jaegertracing/jaeger-operator \
   --namespace logging \
+  --create-namespace \
   --set rbac.clusterRole=true \
-  --set image.tag=1.58.0 \
+  --set image.tag=1.61.0 \
   --wait --timeout 3m
+```
+
+El chart no agrega tolerations para los taints del Lab03. Despu?s de instalar el operador, a??delos a su Deployment:
+
+```bash
+kubectl patch deployment jaeger-operator -n logging --type=json -p='[{"op":"add","path":"/spec/template/spec/tolerations","value":[{"key":"workload-type","operator":"Exists","effect":"NoSchedule"},{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]}]'
+kubectl rollout status deployment/jaeger-operator -n logging --timeout=180s
 ```
 
 2. Esperar a que el operator esté listo:
@@ -568,7 +583,13 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=jaeger-operator
   --namespace logging --timeout=120s
 ```
 
-3. Crear el recurso Jaeger CRD tipo producción:
+3. Exportar la contrase?a administrada por Elasticsearch antes de generar el manifiesto Jaeger:
+
+```bash
+export ELASTIC_PASSWORD="$(kubectl get secret elasticsearch-master-credentials -n logging -o jsonpath='{.data.password}' | base64 -d)"
+```
+
+4. Crear el recurso Jaeger CRD tipo producci?n:
 
 ```bash
 cat > ~/k8s-labs/lab04/jaeger-instance.yaml << EOF
@@ -579,6 +600,11 @@ metadata:
   namespace: logging
 spec:
   strategy: production
+  # Heredar los taints del Lab 03 en collector y query.
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
   
   collector:
     replicas: 1
@@ -608,12 +634,13 @@ spec:
     type: elasticsearch
     options:
       es:
-        server-urls: http://elasticsearch-master.logging.svc.cluster.local:9200
+        server-urls: https://elasticsearch-master.logging.svc.cluster.local:9200
         username: elastic
         password: ${ELASTIC_PASSWORD}
         index-prefix: jaeger
         tls:
-          enabled: false
+          enabled: true
+          skip-host-verify: true
     esIndexCleaner:
       enabled: true
       numberOfDays: 7
@@ -621,13 +648,13 @@ spec:
 EOF
 ```
 
-4. Aplicar el recurso Jaeger:
+5. Aplicar el recurso Jaeger:
 
 ```bash
 kubectl apply -f ~/k8s-labs/lab04/jaeger-instance.yaml
 ```
 
-5. Esperar a que los componentes de Jaeger estén listos:
+6. Esperar a que los componentes de Jaeger estén listos:
 
 ```bash
 # Esperar al collector
@@ -670,7 +697,9 @@ Instrumentar la aplicación `webapp` con un OpenTelemetry Collector sidecar que 
 
 ### Instrucciones
 
-1. Crear el ConfigMap del OpenTelemetry Collector:
+1. Nota: las variables `OTEL_*` no instrumentan una imagen `nginx` por s? solas. Para obtener trazas reales, la imagen de `webapp` debe incluir un SDK OpenTelemetry; el sidecar solo recibe y exporta spans que la aplicaci?n emita. La imagen de ejemplo `nginx` permite validar propagaci?n en logs, pero no genera spans Jaeger por s? misma.
+
+2. Crear el ConfigMap del OpenTelemetry Collector:
 
 ```bash
 cat > ~/k8s-labs/lab04/otel-collector-config.yaml << 'EOF'
@@ -746,6 +775,13 @@ spec:
       labels:
         app: webapp-traced
     spec:
+      tolerations:
+        - key: workload-type
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         # Aplicación principal con instrumentación OTEL
         - name: webapp
@@ -930,6 +966,13 @@ metadata:
 spec:
   template:
     spec:
+      tolerations:
+        - key: workload-type
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: curl
           image: curlimages/curl:8.5.0
@@ -970,7 +1013,7 @@ sleep 15
 # Buscar logs que contengan trace_id
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/kubernetes-*/_search?pretty' \
+  'https://localhost:9200/kubernetes-*/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
     "size": 5,
@@ -995,7 +1038,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 # Consultar servicios registrados en Jaeger
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/jaeger-span-*/_search?pretty' \
+  'https://localhost:9200/jaeger-span-*/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
     "size": 3,
@@ -1014,7 +1057,7 @@ Los logs deben contener campos `trace_id` con valores hexadecimales de 32 caract
 # Contar documentos con trace_id válido
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/kubernetes-*/_count' \
+  'https://localhost:9200/kubernetes-*/_count' \
   -H 'Content-Type: application/json' \
   -d '{
     "query": {
@@ -1148,7 +1191,7 @@ Implementar una política ILM en Elasticsearch para gestionar automáticamente l
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -X PUT \
-  'http://localhost:9200/_ilm/policy/kubernetes-logs-policy' \
+  'https://localhost:9200/_ilm/policy/kubernetes-logs-policy' \
   -H 'Content-Type: application/json' \
   -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
@@ -1190,7 +1233,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -X PUT \
-  'http://localhost:9200/_index_template/kubernetes-logs-template' \
+  'https://localhost:9200/_index_template/kubernetes-logs-template' \
   -H 'Content-Type: application/json' \
   -u "elastic:${ELASTIC_PASSWORD}" \
   -d '{
@@ -1211,7 +1254,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 ```bash
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/_ilm/policy/kubernetes-logs-policy?pretty'
+  'https://localhost:9200/_ilm/policy/kubernetes-logs-policy?pretty'
 ```
 
 ### Salida Esperada
@@ -1237,7 +1280,7 @@ kubectl exec -n logging elasticsearch-master-0 -- \
 # Verificar que el template está aplicado
 kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/_index_template/kubernetes-logs-template?pretty' | \
+  'https://localhost:9200/_index_template/kubernetes-logs-template?pretty' | \
   grep -A2 "lifecycle"
 ```
 
@@ -1255,7 +1298,7 @@ echo "=== VALIDACIÓN COMPLETA DEL LAB 04 ==="
 echo ""
 echo "1. Verificando Elasticsearch..."
 ES_STATUS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://localhost:9200/_cluster/health | \
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" https://localhost:9200/_cluster/health | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
 echo "   Estado del clúster: $ES_STATUS"
 [ "$ES_STATUS" = "green" ] || [ "$ES_STATUS" = "yellow" ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1263,7 +1306,7 @@ echo "   Estado del clúster: $ES_STATUS"
 echo ""
 echo "2. Verificando Kibana..."
 KIBANA_STATUS=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana-kibana:5601/api/status | \
+  curl -s http://kibana-kibana:5601/api/status | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['status']['overall']['level'])" 2>/dev/null)
 echo "   Estado de Kibana: $KIBANA_STATUS"
 [ "$KIBANA_STATUS" = "available" ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1291,7 +1334,7 @@ echo "$WEBAPP_CONTAINERS" | grep -q "otel-collector" && echo "   ✓ PASS" || ec
 echo ""
 echo "6. Verificando índices en Elasticsearch..."
 INDEX_COUNT=$(kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" 'http://localhost:9200/_cat/indices?h=index' | \
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" 'https://localhost:9200/_cat/indices?h=index' | \
   grep -c "kubernetes-")
 echo "   Índices kubernetes-*: $INDEX_COUNT"
 [ "$INDEX_COUNT" -ge 1 ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1300,7 +1343,7 @@ echo ""
 echo "7. Verificando logs con trace_id..."
 TRACE_LOGS=$(kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/kubernetes-*/_count' \
+  'https://localhost:9200/kubernetes-*/_count' \
   -H 'Content-Type: application/json' \
   -d '{"query":{"bool":{"must":[{"match":{"kubernetes.namespace_name":"webapp"}}]}}}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))")
@@ -1311,7 +1354,7 @@ echo ""
 echo "8. Verificando ILM Policy..."
 ILM_EXISTS=$(kubectl exec -n logging elasticsearch-master-0 -- \
   curl -s -u "elastic:${ELASTIC_PASSWORD}" \
-  'http://localhost:9200/_ilm/policy/kubernetes-logs-policy' | \
+  'https://localhost:9200/_ilm/policy/kubernetes-logs-policy' | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print('exists' if 'kubernetes-logs-policy' in d else 'missing')")
 echo "   Política ILM: $ILM_EXISTS"
 [ "$ILM_EXISTS" = "exists" ] && echo "   ✓ PASS" || echo "   ✗ FAIL"
@@ -1373,7 +1416,7 @@ Los pods de Fluentd están Running pero no aparecen índices `kubernetes-*` en E
 # Verificar que Elasticsearch está accesible desde el namespace logging
 kubectl run test-es --rm -it --restart=Never -n logging \
   --image=curlimages/curl:8.5.0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" http://elasticsearch-master:9200/_cluster/health
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" https://elasticsearch-master:9200/_cluster/health
 
 # Si Elasticsearch está healthy, reiniciar Fluentd para limpiar buffers
 kubectl rollout restart daemonset/fluentd -n logging
@@ -1384,7 +1427,7 @@ kubectl rollout status daemonset/fluentd -n logging --timeout=120s
 # Verificar que los índices empiezan a crearse (esperar ~30s)
 sleep 30
 kubectl exec -n logging elasticsearch-master-0 -- \
-  curl -s -u "elastic:${ELASTIC_PASSWORD}" 'http://localhost:9200/_cat/indices?v' | grep kubernetes
+  curl -sk -u "elastic:${ELASTIC_PASSWORD}" 'https://localhost:9200/_cat/indices?v' | grep kubernetes
 ```
 
 ---
