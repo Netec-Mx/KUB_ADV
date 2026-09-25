@@ -1,71 +1,81 @@
-# Kubernets Avanzado
+<img src="images/neteclogo (2).png" alt="logo" width="300"/>
 
-Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, scheduling, observabilidad, extensiones y seguridad en clusters Kubernetes en entornos reales.
+# Kubernetes Avanzado
 
-## Estructura
+## Plataforma de laboratorios
 
-- `CapituloXX/README.md`: guía de laboratorio por capítulo.
+Te damos la bienvenida a la **plataforma de laboratorios** del curso **Kubernetes Avanzado**. Aquí podrás explorar diferentes tecnologías a través de prácticas guiadas. ¡Desarrolla tus habilidades y lleva tus conocimientos al siguiente nivel!
 
 ## Lista de laboratorios
 
-### Capítulo 1
+Cada uno de estos laboratorios está diseñado para ofrecerte una experiencia práctica. Haz clic en los enlaces para comenzar.
 
-- [desplegar y evaluar CNIs (Calico, Cilium)](Capitulo01/README.md#desplegar-y-evaluar-cnis-calico-cilium)
-  - Descripción: Desplegar y evaluar CNIs (Calico, Cilium) para comparar su comportamiento en conectividad, rendimiento y aislamiento dentro del cluster.
-  - Duración estimada: 29 min
+### [Práctica 1. Desplegar y Evaluar CNIs (Calico, Cilium)](Capitulo01/README.md)
 
-### Capítulo 2
+  - **Descripción**: Desplegar y evaluar CNIs (Calico, Cilium) para comparar su comportamiento en conectividad, rendimiento y aislamiento dentro del cluster.
 
-- [implementar Traefik Ingress y Gateway con certificados gestionados](Capitulo02/README.md#implementar-ingress-controller-y-gateway-con-certificados-gestionados)
-  - Descripción: Implementar Traefik Proxy como controlador Ingress y Gateway, con certificados gestionados, terminación TLS y rutas HTTPRoute verificables.
-  - Duración estimada: 34 min
+  - ⏱️ **Duración estimada**: 29 min.
 
-### Capítulo 3
+### [Práctica 2. Implementar Traefik Ingress y Gateway con Certificados Gestionados](Capitulo02/README.md)
 
-- [crear políticas de scheduling y extender comportamiento del scheduler](Capitulo03/README.md#crear-políticas-de-scheduling-y-extender-comportamiento-del-scheduler)
-  - Descripción: Crear políticas de scheduling y extender el comportamiento del scheduler mediante affinity, anti-affinity, taints, tolerations y recursos personalizados.
-  - Duración estimada: 43 min
+  - **Descripción**: Implementar Traefik Proxy como controlador Ingress y Gateway, con certificados gestionados, terminación TLS y rutas HTTPRoute verificables.
 
-### Capítulo 4
+  - ⏱️ **Duración estimada**: 34 min.
 
-- [implementar ELK/EFK y Jaeger para trazabilidad](Capitulo04/README.md#implementar-elkefk-y-jaeger-para-trazabilidad)
-  - Descripción: Implementar ELK/EFK y Jaeger para centralizar logs, habilitar tracing distribuido y apoyar el diagnóstico y el análisis de causa raíz.
-  - Duración estimada: 43 min
+### [Práctica 3. Crear Políticas de Scheduling y Extender Comportamiento del Scheduler](Capitulo03/README.md)
 
-### Capítulo 5
+  - **Descripción**: Crear políticas de scheduling y extender el comportamiento del scheduler mediante affinity, anti-affinity, taints, tolerations y recursos personalizados.
 
-- [desplegar Prometheus, configurar alertas y simular incidentes](Capitulo05/README.md#desplegar-prometheus-configurar-alertas-y-simular-incidentes)
-  - Descripción: Desplegar Prometheus, configurar reglas de alerta y simular incidentes para validar la detección de degradaciones y la respuesta operativa.
-  - Duración estimada: 43 min
+  - ⏱️ **Duración estimada**: 43 min.
 
-### Capítulo 6
+### [Práctica 4. Implementar ELK/EFK y Jaeger para Trazabilidad](Capitulo04/README.md)
 
-- [desarrollar un Operator básico y desplegar CRDs](Capitulo06/README.md#desarrollar-un-operator-básico-y-desplegar-crds)
-  - Descripción: Desarrollar un Operator básico y desplegar CRDs para extender Kubernetes y automatizar operaciones aplicacionales.
-  - Duración estimada: 43 min
+  - **Descripción**: Implementar ELK/EFK y Jaeger para centralizar logs, habilitar tracing distribuido y apoyar el diagnóstico y el análisis de causa raíz.
 
-### Capítulo 7
+  - ⏱️ **Duración estimada**: 43 min.
 
-- [construir y publicar charts; integrar en pipeline CI](Capitulo07/README.md#construir-y-publicar-charts-integrar-en-pipeline-ci)
-  - Descripción: Construir y publicar charts de Helm e integrarlos en un pipeline CI para validar despliegues reproducibles, versionados y con estrategias de rollback.
-  - Duración estimada: 43 min
+### [Práctica 5. Desplegar Prometheus, Configurar Alertas y Simular Incidentes](Capitulo05/README.md)
 
-### Capítulo 8
+  - **Descripción**: Desplegar Prometheus, configurar reglas de alerta y simular incidentes para validar la detección de degradaciones y la respuesta operativa.
 
-- [aplicar hardening, políticas y auditoría en cluster](Capitulo08/README.md#aplicar-hardening-políticas-y-auditoría-en-cluster)
-  - Descripción: Aplicar hardening, políticas de seguridad y auditoría en el cluster para proteger el plano de control, los nodos y las cargas de trabajo.
-  - Duración estimada: 43 min
+  - ⏱️ **Duración estimada**: 43 min.
 
-### Capítulo 9
+### [Práctica 6. Desarrollar un Operator Básico y Desplegar CRDs](Capitulo06/README.md)
 
-- [crear políticas OPA/Gatekeeper y validar enforcement](Capitulo09/README.md#crear-políticas-opagatekeeper-y-validar-enforcement)
-  - Descripción: Crear políticas OPA/Gatekeeper y validar su enforcement para establecer controles declarativos de gobernanza y cumplimiento.
-  - Duración estimada: 43 min
+  - **Descripción**: Desarrollar un Operator básico y desplegar CRDs para extender Kubernetes y automatizar operaciones aplicacionales.
 
-### Capítulo 10
+  - ⏱️ **Duración estimada**: 43 min.
 
-- [diseñar y validar un plan de DR multi-cluster](Capitulo10/README.md#diseñar-y-validar-un-plan-de-dr-multi-cluster)
-  - Descripción: Diseñar y validar un plan de recuperación ante desastres multi-cluster que contemple alta disponibilidad, backups y recuperación.
-  - Duración estimada: 41 min
+### [Práctica 7. Construir y Publicar Charts; Integrar en Pipeline CI](Capitulo07/README.md)
 
+  - **Descripción**: Construir y publicar charts de Helm e integrarlos en un pipeline CI para validar despliegues reproducibles, versionados y con estrategias de rollback.
 
+  - ⏱️ **Duración estimada**: 43 min.
+
+### [Práctica 8. Aplicar Hardening, Políticas y Auditoría en Cluster](Capitulo08/README.md)
+
+  - **Descripción**: Aplicar hardening, políticas de seguridad y auditoría en el cluster para proteger el plano de control, los nodos y las cargas de trabajo.
+
+  - ⏱️ **Duración estimada**: 43 min.
+
+### [Práctica 9. Crear Políticas OPA/Gatekeeper y Validar Enforcement](Capitulo09/README.md)
+
+  - **Descripción**: Crear políticas OPA/Gatekeeper y validar su enforcement para establecer controles declarativos de gobernanza y cumplimiento.
+
+  - ⏱️ **Duración estimada**: 43 min.
+
+### [Práctica 10. Diseñar y Validar un Plan de DR Multi-Cluster](Capitulo10/README.md)
+
+  - **Descripción**: Diseñar y validar un plan de recuperación ante desastres multi-cluster que contemple alta disponibilidad, backups y recuperación.
+
+  - ⏱️ **Duración estimada**: 41 min.
+
+---
+
+## 📬 **Contacto y más información**
+
+Si tienes alguna pregunta o necesitas más detalles, no dudes en [contactarnos](mailto:soporte@netec.com). También puedes encontrar más recursos en nuestra [página](https://netec.com).
+
+---
+
+¡Gracias por visitar nuestra plataforma! No olvides revisar todos los laboratorios y comenzar tu viaje de aprendizaje hoy mismo.
