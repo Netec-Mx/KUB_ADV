@@ -1,5 +1,7 @@
 # Práctica 7 — Construir y Publicar Charts; Integrar en Pipeline CI
 
+{% raw %}
+
 ## Metadata
 
 | Campo | Valor |
@@ -1506,3 +1508,5 @@ En esta práctica has completado el ciclo completo de empaquetado y distribució
 - [Tekton Pipelines Documentation](https://tekton.dev/docs/pipelines/)
 - [helm-unittest Plugin](https://github.com/helm-unittest/helm-unittest)
 - [ChartMuseum API](https://chartmuseum.com/docs/)
+
+{% endraw %}
