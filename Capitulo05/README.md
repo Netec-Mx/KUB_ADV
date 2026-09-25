@@ -1,5 +1,7 @@
 # Desplegar Prometheus, Configurar Alertas y Simular Incidentes
 
+{% raw %}
+
 ## Metadata
 
 | Campo | Valor |
@@ -1852,3 +1854,5 @@ En este laboratorio has completado las siguientes tareas:
 - [PromQL Cheat Sheet](https://promlabs.com/promql-cheat-sheet/)
 - [Alertmanager Configuration](https://prometheus.io/docs/alerting/latest/configuration/)
 - [Google SRE Book — Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/)
+
+{% endraw %}
