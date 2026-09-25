@@ -42,10 +42,10 @@ En este laboratorio se implementarán políticas avanzadas de scheduling sobre e
 
 | Componente | Versión | Propósito |
 |------------|---------|-----------|
-| Kubernetes (kind) | 1.30.2 | Clúster de trabajo |
-| kube-scheduler | v1.30.2 | Imagen para scheduler personalizado |
-| kubectl | 1.30.2 | Gestión del clúster |
-| kind | 0.23.0 | Infraestructura de clúster |
+| Kubernetes (kind) | 1.35.8 | Clúster de trabajo |
+| kube-scheduler | v1.35.8 | Imagen para scheduler personalizado |
+| kubectl | 1.35.x | Gestión del clúster |
+| kind | 0.33.0 | Infraestructura de clúster |
 
 ### Preparación del directorio de trabajo
 
@@ -59,6 +59,7 @@ cd ~/k8s-labs/lab03
 ```bash
 # Cambiar al contexto correcto
 kubectl cluster-info --context kind-lab-calico
+export KUBE_CONTEXT=kind-lab-calico
 
 # Verificar nodos disponibles
 kubectl get nodes -o wide
@@ -68,9 +69,33 @@ kubectl get nodes -o wide
 
 ```
 NAME                       STATUS   ROLES           AGE   VERSION
-lab-calico-control-plane   Ready    control-plane   ...   v1.30.2
-lab-calico-worker          Ready    <none>          ...   v1.30.2
-lab-calico-worker2         Ready    <none>          ...   v1.30.2
+lab-calico-control-plane   Ready    control-plane   ...   v1.35.8
+lab-calico-worker          Ready    <none>          ...   v1.35.8
+lab-calico-worker2         Ready    <none>          ...   v1.35.8
+```
+
+---
+
+## Preservar los workloads de los laboratorios anteriores
+
+Antes de aplicar taints a los workers, añade tolerations a los deployments persistentes del Lab 02. Los pods existentes no son expulsados por `NoSchedule`, pero un reinicio posterior podría quedar en `Pending` si no tolera ambos valores:
+
+```bash
+for item in \
+  webapp/webapp-frontend webapp/webapp-backend webapp/webapp-api webapp/webapp-api-canary \
+  traefik/traefik cert-manager/cert-manager cert-manager/cert-manager-cainjector cert-manager/cert-manager-webhook; do
+  ns=${item%%/*}; deploy=${item##*/}
+  kubectl patch deployment "$deploy" -n "$ns" --type='merge' \
+    -p='{"spec":{"template":{"spec":{"tolerations":[{"key":"workload-type","operator":"Exists","effect":"NoSchedule"}]}}}}'
+done
+```
+
+Verifica que los deployments sigan disponibles antes de continuar:
+
+```bash
+kubectl get deployments -n webapp
+kubectl get deployments -n traefik
+kubectl get deployments -n cert-manager
 ```
 
 ---
@@ -109,9 +134,9 @@ kubectl get nodes -L topology.kubernetes.io/zone,node-type
 
 ```
 NAME                       STATUS   ROLES           AGE   VERSION   ZONE     NODE-TYPE
-lab-calico-control-plane   Ready    control-plane   ...   v1.30.2            
-lab-calico-worker          Ready    <none>          ...   v1.30.2   zone-a   compute
-lab-calico-worker2         Ready    <none>          ...   v1.30.2   zone-b   memory
+lab-calico-control-plane   Ready    control-plane   ...   v1.35.8
+lab-calico-worker          Ready    <none>          ...   v1.35.8   zone-a   compute
+lab-calico-worker2         Ready    <none>          ...   v1.35.8   zone-b   memory
 ```
 
 ### Verificación
@@ -135,13 +160,13 @@ kubectl get node lab-calico-worker2 -o jsonpath='{.metadata.labels.node-type}'
 1. Aplicar taint al worker de compute:
 
 ```bash
-kubectl taint nodes lab-calico-worker workload-type=compute:NoSchedule
+kubectl taint nodes lab-calico-worker workload-type=compute:NoSchedule --overwrite
 ```
 
 2. Aplicar taint al worker de memory:
 
 ```bash
-kubectl taint nodes lab-calico-worker2 workload-type=memory:NoSchedule
+kubectl taint nodes lab-calico-worker2 workload-type=memory:NoSchedule --overwrite
 ```
 
 3. Verificar los taints:
@@ -172,7 +197,7 @@ El pod debe quedar en estado `Pending` porque no tiene tolerations para ningún 
 
 ```bash
 # Limpiar pod de prueba
-kubectl delete pod taint-test -n default --force 2>/dev/null
+kubectl delete pod taint-test -n default --ignore-not-found --timeout=30s
 ```
 
 ---
@@ -518,7 +543,8 @@ metadata:
   name: batch-jobs
   namespace: webapp
 spec:
-  replicas: 6
+  # 16 réplicas de 500m saturan los dos workers de 4 CPU del entorno kind y hacen observable la preemption.
+  replicas: 16
   selector:
     matchLabels:
       app: batch-jobs
@@ -688,6 +714,30 @@ roleRef:
   kind: Role
   name: extension-apiserver-authentication-reader
   apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: custom-scheduler-leader-election
+  namespace: kube-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: custom-scheduler-leader-election
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: custom-scheduler-sa
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: custom-scheduler-leader-election
+  apiGroup: rbac.authorization.k8s.io
 EOF
 ```
 
@@ -770,7 +820,7 @@ spec:
       serviceAccountName: custom-scheduler-sa
       containers:
         - name: kube-scheduler
-          image: registry.k8s.io/kube-scheduler:v1.30.2
+          image: registry.k8s.io/kube-scheduler:v1.35.8
           command:
             - kube-scheduler
             - --config=/etc/kubernetes/config.yaml

@@ -1,0 +1,254 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-sa
+  namespace: webapp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pipeline-sa-admin
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-sa
+    namespace: webapp
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chart-workspace
+  namespace: webapp
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone-chart
+  namespace: webapp
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: revision
+      type: string
+      default: main
+  workspaces:
+    - name: output
+  steps:
+    - name: clone
+      image: alpine/git:2.47.2
+      env:
+        - name: GITEA_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: gitea-credentials
+              key: username
+        - name: GITEA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gitea-credentials
+              key: password
+      script: |
+        #!/bin/sh
+        set -eu
+        WORKDIR="$(workspaces.output.path)"
+        case "$WORKDIR" in /workspace/*) ;; *) exit 1 ;; esac
+        find "$WORKDIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        cat > "$HOME/.netrc" <<EOF
+        machine gitea-http.gitea.svc.cluster.local
+        login ${GITEA_USERNAME}
+        password ${GITEA_PASSWORD}
+        EOF
+        chmod 600 "$HOME/.netrc"
+        git clone --no-checkout "$(params.repo-url)" "$WORKDIR"
+        git -C "$WORKDIR" checkout "$(params.revision)"
+        rm -f "$HOME/.netrc"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: helm-lint
+  namespace: webapp
+spec:
+  params:
+    - name: chart-path
+      type: string
+      default: charts/webapp
+  workspaces:
+    - name: source
+  steps:
+    - name: lint
+      image: alpine/helm:3.20.0
+      script: |
+        #!/bin/sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.chart-path)"
+        helm dependency update
+        helm lint . --strict
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: helm-unittest
+  namespace: webapp
+spec:
+  params:
+    - name: chart-path
+      type: string
+      default: charts/webapp
+  workspaces:
+    - name: source
+  steps:
+    - name: unittest
+      image: helmunittest/helm-unittest:3.15.2-0.5.1
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.chart-path)"
+        helm dependency update
+        helm unittest .
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: helm-package-push
+  namespace: webapp
+spec:
+  params:
+    - name: chart-path
+      type: string
+      default: charts/webapp
+    - name: chartmuseum-url
+      type: string
+      default: http://chartmuseum.helm-registry.svc.cluster.local:8080
+  workspaces:
+    - name: source
+  steps:
+    - name: package
+      image: alpine/helm:3.20.0
+      script: |
+        #!/bin/sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.chart-path)"
+        helm dependency update
+        rm -f ./*.tgz
+        helm package . --destination "$(workspaces.source.path)"
+    - name: publish
+      image: curlimages/curl:8.15.0
+      script: |
+        #!/bin/sh
+        set -eu
+        CHART_FILE=$(find "$(workspaces.source.path)" -maxdepth 1 -name '*.tgz' | head -1)
+        test -n "$CHART_FILE"
+        CODE=$(curl -sS -o /tmp/chartmuseum-response -w '%{http_code}' \
+          --data-binary "@$CHART_FILE" "$(params.chartmuseum-url)/api/charts")
+        case "$CODE" in
+          200|201) echo "Chart publicado: $CHART_FILE" ;;
+          409) echo "La versión ya existe en ChartMuseum; publicación idempotente" ;;
+          *) cat /tmp/chartmuseum-response; exit 1 ;;
+        esac
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: helm-upgrade-release
+  namespace: webapp
+spec:
+  params:
+    - name: chart-path
+      type: string
+      default: charts/webapp
+    - name: release-name
+      type: string
+      default: webapp
+    - name: namespace
+      type: string
+      default: webapp
+    - name: values-file
+      type: string
+      default: values.yaml
+  workspaces:
+    - name: source
+  steps:
+    - name: upgrade
+      image: alpine/helm:3.20.0
+      script: |
+        #!/bin/sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.chart-path)"
+        helm dependency update
+        helm upgrade --install "$(params.release-name)" . \
+          -f "$(params.values-file)" --namespace "$(params.namespace)" \
+          --wait --timeout 180s --atomic
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: webapp-chart-ci
+  namespace: webapp
+spec:
+  params:
+    - name: repo-url
+      type: string
+      default: http://gitea-http.gitea.svc.cluster.local:3000/admin/webapp-chart.git
+    - name: revision
+      type: string
+      default: main
+    - name: chart-path
+      type: string
+      default: charts/webapp
+    - name: chartmuseum-url
+      type: string
+      default: http://chartmuseum.helm-registry.svc.cluster.local:8080
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: fetch-source
+      taskRef: {name: git-clone-chart}
+      params:
+        - {name: repo-url, value: "$(params.repo-url)"}
+        - {name: revision, value: "$(params.revision)"}
+      workspaces:
+        - {name: output, workspace: shared-workspace}
+    - name: lint
+      taskRef: {name: helm-lint}
+      runAfter: [fetch-source]
+      params:
+        - {name: chart-path, value: "$(params.chart-path)"}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+    - name: unit-test
+      taskRef: {name: helm-unittest}
+      runAfter: [lint]
+      params:
+        - {name: chart-path, value: "$(params.chart-path)"}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+    - name: package-publish
+      taskRef: {name: helm-package-push}
+      runAfter: [unit-test]
+      params:
+        - {name: chart-path, value: "$(params.chart-path)"}
+        - {name: chartmuseum-url, value: "$(params.chartmuseum-url)"}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+    - name: deploy-dev
+      taskRef: {name: helm-upgrade-release}
+      runAfter: [package-publish]
+      params:
+        - {name: chart-path, value: "$(params.chart-path)"}
+        - {name: release-name, value: webapp}
+        - {name: namespace, value: webapp}
+        - {name: values-file, value: values.yaml}
+      workspaces:
+        - {name: source, workspace: shared-workspace}

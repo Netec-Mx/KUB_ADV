@@ -1,5 +1,3 @@
-<img src="images/neteclogo (2).png" alt="logo" width="300"/>
-
 # Kubernets Avanzado
 
 Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, scheduling, observabilidad, extensiones y seguridad en clusters Kubernetes en entornos reales.
@@ -18,8 +16,8 @@ Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, sched
 
 ### Capítulo 2
 
-- [implementar Ingress controller y Gateway con certificados gestionados](Capitulo02/README.md#implementar-ingress-controller-y-gateway-con-certificados-gestionados)
-  - Descripción: Implementar un Ingress controller y un Gateway con certificados gestionados para exponer servicios mediante terminación TLS segura.
+- [implementar Traefik Ingress y Gateway con certificados gestionados](Capitulo02/README.md#implementar-ingress-controller-y-gateway-con-certificados-gestionados)
+  - Descripción: Implementar Traefik Proxy como controlador Ingress y Gateway, con certificados gestionados, terminación TLS y rutas HTTPRoute verificables.
   - Duración estimada: 34 min
 
 ### Capítulo 3
@@ -71,12 +69,3 @@ Curso avanzado para diseñar, evaluar y optimizar redes, accesos externos, sched
   - Duración estimada: 41 min
 
 
-  ---
-
-## 📬 **Contacto y más información**
-
-Si tienes alguna pregunta o necesitas más detalles, no dudes en [contactarnos](mailto:soporte@netec.com). También puedes encontrar más recursos en nuestra [página](https://netec.com).
-
----
-
-¡Gracias por visitar nuestra plataforma! No olvides revisar todos los laboratorios y comenzar tu viaje de aprendizaje hoy mismo.

@@ -34,9 +34,9 @@ En este laboratorio desplegarás dos clústeres Kubernetes multi-nodo usando kin
 |------------|---------|--------------|
 | Ubuntu 22.04 LTS | kernel >= 5.15 | `uname -r` |
 | Docker Engine | 26.1.4 | `docker --version` |
-| kubectl | 1.30.2 | `kubectl version --client` |
-| kind | 0.23.0 | `kind --version` |
-| Helm | 3.15.2 | `helm version --short` |
+| kubectl | 1.35.x | `kubectl version --client` |
+| kind | 0.33.0 | `kind --version` |
+| Helm | 3.20.x o posterior compatible | `helm version --short` |
 | Cilium CLI | 0.16.10 | `cilium version --client` |
 | calicoctl | 3.28.0 | `calicoctl version` |
 
@@ -82,18 +82,25 @@ networking:
   serviceSubnet: "10.96.0.0/12"
 nodes:
   - role: control-plane
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 443
+        protocol: TCP
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
 EOF
 ```
 
 2. Crea el clúster:
 
 ```bash
-kind create cluster --config ~/k8s-labs/lab01/calico/kind-calico.yaml
+kind create cluster --config ~/k8s-labs/lab01/calico/kind-calico.yaml --wait 3m
 ```
 
 3. Verifica que el contexto está activo:
@@ -120,9 +127,9 @@ Salida esperada (todos en `NotReady`):
 
 ```
 NAME                       STATUS     ROLES           AGE   VERSION
-lab-calico-control-plane   NotReady   control-plane   30s   v1.30.2
-lab-calico-worker          NotReady   <none>          20s   v1.30.2
-lab-calico-worker2         NotReady   <none>          20s   v1.30.2
+lab-calico-control-plane   NotReady   control-plane   30s   v1.35.x
+lab-calico-worker          NotReady   <none>          20s   v1.35.x
+lab-calico-worker2         NotReady   <none>          20s   v1.35.x
 ```
 
 ---
@@ -176,6 +183,7 @@ kubectl apply -f ~/k8s-labs/lab01/calico/calico-installation.yaml
 4. Espera a que todos los componentes de Calico estén listos:
 
 ```bash
+until kubectl get pods -n calico-system -o name 2>/dev/null | grep -q .; do sleep 5; done
 kubectl wait --for=condition=Ready pods --all -n calico-system --timeout=120s
 ```
 
@@ -282,7 +290,8 @@ kubectl apply -f ~/k8s-labs/lab01/nettest/nettest-calico.yaml
 3. Espera a que los pods estén listos:
 
 ```bash
-kubectl wait --for=condition=Ready pods --all -n network-test --timeout=90s
+kubectl wait --for=condition=Available deployment/nettest-server -n network-test --timeout=90s
+kubectl wait --for=condition=Available deployment/nettest-client -n network-test --timeout=90s
 ```
 
 4. Verifica la conectividad entre pods:
@@ -338,11 +347,11 @@ networking:
   serviceSubnet: "10.96.0.0/12"
 nodes:
   - role: control-plane
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
   - role: worker
-    image: kindest/node:v1.30.2
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
 EOF
 ```
 
@@ -363,7 +372,7 @@ kubectl config current-context
 
 ```
 Creating cluster "lab-cilium" ...
- ✓ Ensuring node image (kindest/node:v1.30.2) 🖼
+ ✓ Ensuring node image (kindest/node:v1.35.8) 🖼
  ✓ Preparing nodes 📦 📦 📦
  ✓ Writing configuration 📜
  ✓ Starting control-plane 🕹️
@@ -467,7 +476,8 @@ kubectl apply -f ~/k8s-labs/lab01/nettest/nettest-calico.yaml --context kind-lab
 2. Espera a que los pods estén listos:
 
 ```bash
-kubectl wait --for=condition=Ready pods --all -n network-test --timeout=90s --context kind-lab-cilium
+kubectl wait --for=condition=Available deployment/nettest-server -n network-test --timeout=90s --context kind-lab-cilium
+kubectl wait --for=condition=Available deployment/nettest-client -n network-test --timeout=90s --context kind-lab-cilium
 ```
 
 3. Verifica la conectividad:
@@ -793,9 +803,9 @@ kind-lab-calico
 
 ```
 NAME                       STATUS   ROLES           AGE   VERSION   INTERNAL-IP   ...
-lab-calico-control-plane   Ready    control-plane   15m   v1.30.2   172.18.0.x    ...
-lab-calico-worker          Ready    <none>          14m   v1.30.2   172.18.0.x    ...
-lab-calico-worker2         Ready    <none>          14m   v1.30.2   172.18.0.x    ...
+lab-calico-control-plane   Ready    control-plane   15m   v1.35.x   172.18.0.x    ...
+lab-calico-worker          Ready    <none>          14m   v1.35.x   172.18.0.x    ...
+lab-calico-worker2         Ready    <none>          14m   v1.35.x   172.18.0.x    ...
 ```
 
 ---

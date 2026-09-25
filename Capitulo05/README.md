@@ -41,7 +41,7 @@ En este laboratorio desplegarás el stack completo de monitorización kube-prome
 
 | Componente | Versión/Detalle |
 |------------|----------------|
-| Kubernetes | 1.30.2 (kind) |
+| Kubernetes | 1.35.8 (kind) |
 | kube-prometheus-stack | 61.3.0 |
 | Prometheus | 2.53.0 |
 | Grafana | 11.1.0 |
@@ -52,8 +52,9 @@ En este laboratorio desplegarás el stack completo de monitorización kube-prome
 ### Preparación Inicial
 
 ```bash
-# Verificar contexto del clúster
-kubectl config use-context kind-lab-calico
+# Verificar contexto del clúster sin depender del contexto global
+export KUBE_CONTEXT=kind-lab-calico
+kubectl cluster-info --context "$KUBE_CONTEXT"
 
 # Crear directorio de trabajo
 mkdir -p ~/k8s-labs/lab05/{values,rules,monitors,alertmanager,incidents,dashboards}
@@ -68,8 +69,18 @@ kubectl get pods -n webapp
 kubectl get svc -n webapp
 
 # Añadir repo Helm si no existe
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
 helm repo update
+
+# Crear el namespace antes de guardar la credencial de Grafana.
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
+
+# Credencial efímera para Grafana; no se guarda en el repositorio.
+export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+  --dry-run=client -o yaml | kubectl apply --context "$KUBE_CONTEXT" -f -
 ```
 
 ## Paso a Paso
@@ -106,6 +117,13 @@ spec:
       labels:
         app: alertmanager-webhook
     spec:
+      tolerations:
+        - key: workload-type
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: webhook
           image: python:3.11-slim
@@ -198,7 +216,7 @@ kubectl get pods -n monitoring -l app=alertmanager-webhook
 1. Crear el archivo de valores principal:
 
 ```bash
-cat > ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml << 'EOF'
+cat > ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml << EOF
 # kube-prometheus-stack 61.3.0 - Valores personalizados
 fullnameOverride: ""
 namespaceOverride: "monitoring"
@@ -207,6 +225,13 @@ namespaceOverride: "monitoring"
 prometheus:
   prometheusSpec:
     replicas: 1
+    tolerations:
+      - key: workload-type
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
     retention: 7d
     retentionSize: "18GB"
     scrapeInterval: 30s
@@ -244,6 +269,13 @@ prometheus:
 alertmanager:
   alertmanagerSpec:
     replicas: 1
+    tolerations:
+      - key: workload-type
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
     resources:
       requests:
         memory: "128Mi"
@@ -305,8 +337,18 @@ alertmanager:
 # --- Grafana ---
 grafana:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
   adminUser: admin
-  adminPassword: "KubeGrafana2024!"
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
   persistence:
     enabled: true
     storageClassName: standard
@@ -327,27 +369,49 @@ grafana:
   additionalDataSources:
     - name: Elasticsearch
       type: elasticsearch
-      url: http://elasticsearch-master.logging.svc:9200
+      url: https://elasticsearch-master.logging.svc:9200
       access: proxy
       basicAuth: true
       basicAuthUser: elastic
       secureJsonData:
-        basicAuthPassword: "ElasticK8s2024!"
+         basicAuthPassword: "${ELASTIC_PASSWORD}"
       jsonData:
-        index: "filebeat-*"
+        tlsSkipVerify: true
+        index: "kubernetes-*"
         timeField: "@timestamp"
         esVersion: "8.0.0"
 
 # --- Node Exporter ---
 nodeExporter:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
 # --- kube-state-metrics ---
 kubeStateMetrics:
   enabled: true
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
 
 # --- Prometheus Operator ---
 prometheusOperator:
+  tolerations:
+    - key: workload-type
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
   resources:
     requests:
       memory: "128Mi"
@@ -385,6 +449,18 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   -f ~/k8s-labs/lab05/values/kube-prometheus-stack-values.yaml \
   --timeout 10m \
   --wait
+```
+
+Si el chart queda bloqueado en `kube-prometheus-stack-admission-create` por los taints del Lab03, aplica temporalmente este procedimiento para completar el hook y vuelve a colocar los taints al finalizar:
+
+```bash
+kubectl taint node lab-calico-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint node lab-calico-worker workload-type=compute:NoSchedule-
+kubectl taint node lab-calico-worker2 workload-type=memory:NoSchedule-
+kubectl wait --for=condition=complete job/kube-prometheus-stack-admission-create -n monitoring --timeout=180s
+kubectl taint node lab-calico-control-plane node-role.kubernetes.io/control-plane:NoSchedule --overwrite
+kubectl taint node lab-calico-worker workload-type=compute:NoSchedule --overwrite
+kubectl taint node lab-calico-worker2 workload-type=memory:NoSchedule --overwrite
 ```
 
 2. Verificar que todos los componentes están running:
@@ -674,30 +750,29 @@ spec:
 EOF
 ```
 
-2. Crear un ServiceMonitor adicional para NGINX Ingress Controller:
+2. Crear un ServiceMonitor adicional para Traefik:
 
 ```bash
-cat > ~/k8s-labs/lab05/monitors/ingress-servicemonitor.yaml << 'EOF'
+cat > ~/k8s-labs/lab05/monitors/traefik-servicemonitor.yaml << 'EOF'
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: ingress-nginx-monitor
-  namespace: ingress-nginx
+  name: traefik-monitor
+  namespace: traefik
   labels:
-    app: ingress-nginx
+    app.kubernetes.io/name: traefik
     release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: ingress-nginx
-      app.kubernetes.io/component: controller
+      app.kubernetes.io/name: traefik
   endpoints:
     - port: metrics
       interval: 30s
       path: /metrics
   namespaceSelector:
     matchNames:
-      - ingress-nginx
+      - traefik
 EOF
 ```
 
@@ -705,7 +780,7 @@ EOF
 
 ```bash
 kubectl apply -f ~/k8s-labs/lab05/monitors/webapp-servicemonitor.yaml
-kubectl apply -f ~/k8s-labs/lab05/monitors/ingress-servicemonitor.yaml
+kubectl apply -f ~/k8s-labs/lab05/monitors/traefik-servicemonitor.yaml
 ```
 
 4. Verificar que Prometheus descubrió los targets:
@@ -725,7 +800,7 @@ kill %1 2>/dev/null
 
 ```
 servicemonitor.monitoring.coreos.com/webapp-monitor created
-servicemonitor.monitoring.coreos.com/ingress-nginx-monitor created
+servicemonitor.monitoring.coreos.com/traefik-monitor created
 ```
 
 **Verificación:**
