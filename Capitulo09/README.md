@@ -1,5 +1,7 @@
 # Práctica 9 — Crear Políticas OPA/Gatekeeper y Validar Enforcement
 
+{% raw %}
+
 ## Metadata
 
 | Campo | Valor |
@@ -1558,3 +1560,5 @@ En este laboratorio has implementado una capa completa de governance para Kubern
 - [Kyverno Policy Catalog](https://kyverno.io/policies/)
 - [OPA Rego Playground](https://play.openpolicyagent.org/)
 - [Documentación de Gatekeeper Audit](https://open-policy-agent.github.io/gatekeeper/website/docs/audit/)
+
+{% endraw %}
