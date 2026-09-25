@@ -1,5 +1,7 @@
 # Diseñar y Validar un Plan de DR Multi-Cluster
 
+{% raw %}
+
 ## Metadatos
 
 | Campo | Valor |
@@ -1502,3 +1504,6 @@ El modelo implementado corresponde a **activo-pasivo** con failover manual asist
 - [Velero Disaster Recovery Best Practices](https://velero.io/docs/v1.14/disaster-case/)
 - [Kubernetes SIG Multicluster](https://github.com/kubernetes-sigs/about-api)
 - [Prometheus Federation](https://prometheus.io/docs/prometheus/latest/federation/)
+
+
+{% endraw %}
